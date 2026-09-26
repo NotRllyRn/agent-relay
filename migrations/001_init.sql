@@ -1,0 +1,14 @@
+CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events(origin_id TEXT NOT NULL,origin_seq INTEGER NOT NULL,event_id TEXT NOT NULL UNIQUE,event_type TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,correlation_id TEXT,causation_event_id TEXT,created_at TEXT NOT NULL,payload_json BLOB NOT NULL,prev_hash BLOB,event_hash BLOB NOT NULL,PRIMARY KEY(origin_id,origin_seq));
+CREATE INDEX IF NOT EXISTS events_aggregate_idx ON events(aggregate_type,aggregate_id); CREATE INDEX IF NOT EXISTS events_correlation_idx ON events(correlation_id);
+CREATE TABLE IF NOT EXISTS origin_heads(origin_id TEXT PRIMARY KEY,head_seq INTEGER NOT NULL,head_hash BLOB,updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS peer_cursors(peer_id TEXT NOT NULL,origin_id TEXT NOT NULL,confirmed_seq INTEGER NOT NULL DEFAULT 0,updated_at TEXT NOT NULL,PRIMARY KEY(peer_id,origin_id));
+CREATE TABLE IF NOT EXISTS threads(thread_id TEXT PRIMARY KEY,peer_id TEXT NOT NULL,subject TEXT,state TEXT NOT NULL DEFAULT 'open',created_at TEXT NOT NULL,last_message_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS messages(message_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,reply_to_message_id TEXT,sender_id TEXT NOT NULL,recipient_id TEXT NOT NULL,kind TEXT NOT NULL,priority TEXT NOT NULL,subject TEXT,body_markdown TEXT NOT NULL,ack_required INTEGER NOT NULL,reply_depth INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,sent_at TEXT,received_at TEXT,delivered_at TEXT,acknowledged_at TEXT);
+CREATE INDEX IF NOT EXISTS messages_thread_idx ON messages(thread_id,created_at);
+CREATE TABLE IF NOT EXISTS tasks(task_id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,created_by TEXT NOT NULL,assigned_to TEXT NOT NULL,objective TEXT NOT NULL,context_json BLOB NOT NULL,expected_deliverable TEXT,priority TEXT NOT NULL,status TEXT NOT NULL,blocker TEXT,final_result TEXT,update_interval_seconds INTEGER NOT NULL DEFAULT 3600,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,last_progress_at TEXT);
+CREATE TABLE IF NOT EXISTS task_progress(event_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,summary TEXT NOT NULL,next_step TEXT,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS peer_state(peer_id TEXT PRIMARY KEY,last_seen_at TEXT,last_sync_at TEXT,last_status_json BLOB,last_error TEXT);
+CREATE TABLE IF NOT EXISTS hermes_threads(thread_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS delivery_jobs(message_id TEXT PRIMARY KEY,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT);
+CREATE TABLE IF NOT EXISTS notification_jobs(notification_id TEXT PRIMARY KEY,task_id TEXT,body TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT,created_at TEXT NOT NULL);
