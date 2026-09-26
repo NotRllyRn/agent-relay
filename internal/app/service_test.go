@@ -41,7 +41,7 @@ func TestTaskLifecycleOwnership(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = a.UpdateTask(ctx, task.TaskID, "accepted", "ok", "", "", ""); e == nil {
+	if _, e = a.UpdateTask(ctx, task.TaskID, "accepted", "ok", "", "", "", false, nil); e == nil {
 		t.Fatal("creator changed assignee state")
 	}
 }

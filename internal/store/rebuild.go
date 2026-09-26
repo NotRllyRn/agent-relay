@@ -59,7 +59,7 @@ func (s *Store) RebuildProjections(ctx context.Context, backupPath string) error
 		return e
 	}
 	defer tx.Rollback()
-	for _, q := range []string{"DELETE FROM messages", "DELETE FROM threads", "DELETE FROM tasks", "DELETE FROM task_progress", "DELETE FROM delivery_jobs", "DELETE FROM notification_jobs", "DELETE FROM pending_projections"} {
+	for _, q := range []string{"DELETE FROM messages", "DELETE FROM threads", "DELETE FROM tasks", "DELETE FROM task_progress", "DELETE FROM delivery_jobs", "DELETE FROM task_delivery_jobs", "DELETE FROM notification_jobs", "DELETE FROM pending_projections"} {
 		if _, e = tx.ExecContext(ctx, q); e != nil {
 			return e
 		}
@@ -87,6 +87,13 @@ func (s *Store) RebuildProjections(ctx context.Context, backupPath string) error
 			return fmt.Errorf("unresolved projection dependencies: %v", ids)
 		}
 		remaining = append([]domain.Event(nil), next...)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, e = tx.ExecContext(ctx, "INSERT INTO delivery_jobs(message_id,state,attempts,next_attempt_at) SELECT message_id,'pending',0,? FROM messages WHERE recipient_id=? AND delivered_at IS NULL", now, s.localID); e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, "INSERT INTO task_delivery_jobs(task_id,state,attempts,next_attempt_at) SELECT task_id,'pending',0,? FROM tasks WHERE assigned_to=?", now, s.localID); e != nil {
+		return e
 	}
 	return tx.Commit()
 }

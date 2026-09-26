@@ -54,7 +54,13 @@ func (e Event) ValidateHash() bool {
 	return len(e.EventHash) == sha256.Size && string(e.EventHash) == string(e.Hash())
 }
 
-type ArtifactRef struct{ Kind, Value, HostID, Label, SHA256 string }
+type ArtifactRef struct {
+	Kind   string `json:"kind"`
+	Value  string `json:"value"`
+	HostID string `json:"host_id,omitempty"`
+	Label  string `json:"label,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
 type Message struct {
 	MessageID        string    `json:"message_id"`
 	ThreadID         string    `json:"thread_id"`
@@ -83,6 +89,7 @@ type Task struct {
 	FinalResult           string          `json:"final_result,omitempty"`
 	UpdateIntervalSeconds int             `json:"update_interval_seconds"`
 	CreatedAt             time.Time       `json:"created_at"`
+	ArtifactRefs          []ArtifactRef   `json:"artifact_refs,omitempty"`
 }
 type TaskUpdate struct {
 	TaskID, Summary, NextStep, Blocker, FinalResult string
@@ -120,6 +127,17 @@ func ValidateMessage(m Message, maxBody int) error {
 	}
 	if m.ReplyDepth > 12 {
 		return fmt.Errorf("maximum reply depth exceeded")
+	}
+	return nil
+}
+func ValidateArtifactRefs(refs []ArtifactRef) error {
+	for _, ref := range refs {
+		if !oneOf(ref.Kind, "local_path", "url", "git", "report", "log", "other") || strings.TrimSpace(ref.Value) == "" {
+			return fmt.Errorf("invalid artifact reference")
+		}
+		if ref.Kind == "local_path" && ref.HostID == "" {
+			return fmt.Errorf("local_path artifact requires host_id")
+		}
 	}
 	return nil
 }

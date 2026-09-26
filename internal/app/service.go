@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,8 @@ type Service struct {
 	ThreadRateWindow    time.Duration
 	PingPeer            func(context.Context, string) (any, error)
 	DefaultTaskInterval time.Duration
+	messageMu           sync.Mutex
+	AllowedPeers        map[string]bool
 }
 type SendInput struct {
 	Recipient, Subject, Body, Kind, Priority string
@@ -32,6 +35,9 @@ type SendResult struct {
 }
 
 func (s *Service) Send(ctx context.Context, in SendInput) (SendResult, error) {
+	if s.AllowedPeers != nil && !s.AllowedPeers[in.Recipient] {
+		return SendResult{}, fmt.Errorf("recipient %q is not configured", in.Recipient)
+	}
 	mid, e := domain.NewID("msg")
 	if e != nil {
 		return SendResult{}, e
@@ -57,6 +63,8 @@ func (s *Service) Send(ctx context.Context, in SendInput) (SendResult, error) {
 	return SendResult{mid, tid, "queued"}, e
 }
 func (s *Service) Reply(ctx context.Context, thread, parent, body, kind, priority string, ack bool) (SendResult, error) {
+	s.messageMu.Lock()
+	defer s.messageMu.Unlock()
 	p, e := s.Store.GetMessage(ctx, parent)
 	if e != nil {
 		return SendResult{}, e
@@ -130,9 +138,16 @@ type DelegateInput struct {
 	Context                       any
 	ExpectedDeliverable, Priority string
 	UpdateIntervalMinutes         int
+	ArtifactRefs                  []domain.ArtifactRef
 }
 
 func (s *Service) Delegate(ctx context.Context, in DelegateInput) (domain.Task, error) {
+	if s.AllowedPeers != nil && !s.AllowedPeers[in.Recipient] {
+		return domain.Task{}, fmt.Errorf("recipient %q is not configured", in.Recipient)
+	}
+	if err := domain.ValidateArtifactRefs(in.ArtifactRefs); err != nil {
+		return domain.Task{}, err
+	}
 	tid, _ := domain.NewID("task")
 	thr, _ := domain.NewID("thr")
 	raw, e := json.Marshal(in.Context)
@@ -149,17 +164,30 @@ func (s *Service) Delegate(ctx context.Context, in DelegateInput) (domain.Task, 
 		}
 		in.UpdateIntervalMinutes = int(interval / time.Minute)
 	}
-	t := domain.Task{TaskID: tid, ThreadID: thr, CreatedBy: s.LocalID, AssignedTo: in.Recipient, Objective: in.Objective, Context: raw, ExpectedDeliverable: in.ExpectedDeliverable, Priority: in.Priority, Status: "proposed", UpdateIntervalSeconds: in.UpdateIntervalMinutes * 60, CreatedAt: time.Now().UTC()}
+	t := domain.Task{TaskID: tid, ThreadID: thr, CreatedBy: s.LocalID, AssignedTo: in.Recipient, Objective: in.Objective, Context: raw, ExpectedDeliverable: in.ExpectedDeliverable, Priority: in.Priority, Status: "proposed", UpdateIntervalSeconds: in.UpdateIntervalMinutes * 60, CreatedAt: time.Now().UTC(), ArtifactRefs: in.ArtifactRefs}
 	_, e = s.Store.Append(ctx, "task.created", "task", tid, thr, "", t)
 	if e == nil {
 		s.wake()
 	}
 	return t, e
 }
-func (s *Service) UpdateTask(ctx context.Context, id, status, summary, next, blocker, result string) (domain.Event, error) {
+func (s *Service) UpdateTask(ctx context.Context, id, status, summary, next, blocker, result string, meaningful bool, artifacts []domain.ArtifactRef) (domain.Event, error) {
+	if err := domain.ValidateArtifactRefs(artifacts); err != nil {
+		return domain.Event{}, err
+	}
 	t, e := s.Store.GetTask(ctx, id)
 	if e != nil {
 		return domain.Event{}, e
+	}
+	if status == "cancel_requested" {
+		if t.CreatedBy != s.LocalID {
+			return domain.Event{}, fmt.Errorf("only creator can request cancellation")
+		}
+		ev, err := s.Store.Append(ctx, "task.cancel_requested", "task", id, t.ThreadID, "", map[string]any{"task_id": id, "summary": summary})
+		if err == nil {
+			s.wake()
+		}
+		return ev, err
 	}
 	if t.AssignedTo != s.LocalID {
 		return domain.Event{}, fmt.Errorf("only assignee can update task")
@@ -174,9 +202,9 @@ func (s *Service) UpdateTask(ctx context.Context, id, status, summary, next, blo
 			return domain.Event{}, fmt.Errorf("invalid status")
 		}
 	}
-	p := map[string]any{"task_id": id, "summary": summary, "next_step": next, "blocker": blocker, "final_result": result}
+	p := map[string]any{"task_id": id, "summary": summary, "next_step": next, "blocker": blocker, "final_result": result, "artifact_refs": artifacts}
 	ev, e := s.Store.Append(ctx, eventType, "task", id, t.ThreadID, "", p)
-	if e == nil && s.NotifyTasks && (status != "" || eventType == "task.progress") {
+	if e == nil && s.NotifyTasks && (status != "" || meaningful) {
 		nid := "notif_" + ev.EventID
 		body := fmt.Sprintf("%s — task %s: %s", s.LocalID, id, summary)
 		if status != "" {

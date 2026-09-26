@@ -99,7 +99,7 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]SearchResult
 		limit = 20
 	}
 	like := "%" + q + "%"
-	rows, e := s.db.QueryContext(ctx, `SELECT 'message',message_id,thread_id,COALESCE(subject,''),body_markdown FROM messages WHERE subject LIKE ? OR body_markdown LIKE ? UNION ALL SELECT 'task',task_id,thread_id,objective,COALESCE(final_result,'') FROM tasks WHERE objective LIKE ? OR final_result LIKE ? LIMIT ?`, like, like, like, like, limit)
+	rows, e := s.db.QueryContext(ctx, `SELECT 'message',message_id,thread_id,COALESCE(subject,''),body_markdown FROM messages WHERE subject LIKE ? OR body_markdown LIKE ? UNION ALL SELECT 'task',task_id,thread_id,objective,COALESCE(final_result,'') FROM tasks WHERE objective LIKE ? OR final_result LIKE ? UNION ALL SELECT 'task_progress',p.event_id,t.thread_id,t.objective,p.summary FROM task_progress p JOIN tasks t ON t.task_id=p.task_id WHERE p.summary LIKE ? OR COALESCE(p.next_step,'') LIKE ? LIMIT ?`, like, like, like, like, like, like, limit)
 	if e != nil {
 		return nil, e
 	}

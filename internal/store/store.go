@@ -333,6 +333,20 @@ func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 		result, _ := p["final_result"].(string)
 		_, err := tx.ExecContext(ctx, "UPDATE tasks SET status=?,blocker=?,final_result=?,updated_at=?,last_progress_at=? WHERE task_id=?", status, null(blocker), null(result), e.CreatedAt.Format(time.RFC3339Nano), e.CreatedAt.Format(time.RFC3339Nano), tid)
 		return err
+	case "thread.muted", "thread.closed":
+		state := map[string]string{"thread.muted": "muted", "thread.closed": "closed"}[e.EventType]
+		result, err := tx.ExecContext(ctx, "UPDATE threads SET state=? WHERE thread_id=?", state, e.AggregateID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("%w: thread %s", errProjectionDependency, e.AggregateID)
+		}
+		return nil
 	}
 	return fmt.Errorf("unknown event type %q", e.EventType)
 }
@@ -467,6 +481,21 @@ func (s *Store) Verify(ctx context.Context) error {
 				return fmt.Errorf("invalid chain %s at %d", o, e.OriginSeq)
 			}
 			prev = e.EventHash
+		}
+	}
+	checks := []struct{ name, query string }{
+		{"pending projections", "SELECT COUNT(*) FROM pending_projections"},
+		{"orphan replies", "SELECT COUNT(*) FROM messages child LEFT JOIN messages parent ON parent.message_id=child.reply_to_message_id WHERE child.reply_to_message_id IS NOT NULL AND (parent.message_id IS NULL OR parent.thread_id<>child.thread_id)"},
+		{"orphan task threads", "SELECT COUNT(*) FROM tasks t LEFT JOIN threads th ON th.thread_id=t.thread_id WHERE th.thread_id IS NULL"},
+		{"cursor beyond head", "SELECT COUNT(*) FROM peer_cursors c LEFT JOIN origin_heads h ON h.origin_id=c.origin_id WHERE c.confirmed_seq>COALESCE(h.head_seq,0)"},
+	}
+	for _, check := range checks {
+		var n int
+		if err = s.db.QueryRowContext(ctx, check.query).Scan(&n); err != nil {
+			return err
+		}
+		if n != 0 {
+			return fmt.Errorf("%s: %d", check.name, n)
 		}
 	}
 	var check string

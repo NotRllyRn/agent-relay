@@ -130,6 +130,11 @@ func serveCmd(args []string) error {
 	if e != nil {
 		return e
 	}
+	if c.LogFormat == "json" {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	} else {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	s, e := store.Open(ctx, c.DBPath(), c.AgentID, c.MaxEventPayload)
@@ -139,12 +144,17 @@ func serveCmd(args []string) error {
 	defer s.Close()
 	hclient := &hermes.Client{BaseURL: c.Hermes.BaseURL, APIKey: os.Getenv(c.Hermes.APIKeyEnv), HTTP: httpClient()}
 	wake := make(chan struct{}, 1)
-	svc := &app.Service{LocalID: c.AgentID, Store: s, MaxMessageBody: c.MaxMessageBody, NotifyTasks: c.Discord.Enabled, DefaultTaskInterval: time.Duration(c.Discord.MaxSilenceMinutes) * time.Minute, WakeSync: func() {
-		select {
-		case wake <- struct{}{}:
-		default:
-		}
-	}}
+	allowedPeers := make(map[string]bool, len(c.Peers))
+	for _, configured := range c.Peers {
+		allowedPeers[configured.ID] = true
+	}
+	svc := &app.Service{LocalID: c.AgentID, Store: s, MaxMessageBody: c.MaxMessageBody, MaxReplyDepth: c.MaxReplyDepth, ThreadRateLimit: c.ThreadRateLimit, ThreadRateWindow: time.Duration(c.ThreadRateWindowSeconds) * time.Second, NotifyTasks: c.Discord.Enabled, DefaultTaskInterval: time.Duration(c.Discord.MaxSilenceMinutes) * time.Minute,
+		AllowedPeers: allowedPeers, WakeSync: func() {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}}
 	ps := &peer.Server{Store: s, LocalID: c.AgentID, Version: version, Credentials: creds(c), MaxBody: c.MaxRequestBytes, MaxEvents: c.MaxEvents, HermesHealth: hclient.Health}
 	peerHTTP := &http.Server{Addr: c.PeerListen, Handler: ps.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	mux := http.NewServeMux()
@@ -298,9 +308,20 @@ func operatorCmd(cmd string, args []string) error {
 		}
 		return errors.New("unknown peer")
 	case "status":
-		head, _, _ := s.Head(ctx, c.AgentID)
-		counts, e := s.Counts(ctx)
-		return printJSON(map[string]any{"agent": c.AgentID, "local_head": head, "counts": counts}, e)
+		head, _, err := s.Head(ctx, c.AgentID)
+		if err != nil {
+			return err
+		}
+		counts, err := s.Counts(ctx)
+		if err != nil {
+			return err
+		}
+		presence, err := s.PeerPresence(ctx)
+		if err != nil {
+			return err
+		}
+		hc := &hermes.Client{BaseURL: c.Hermes.BaseURL, APIKey: os.Getenv(c.Hermes.APIKeyEnv), HTTP: httpClient()}
+		return printJSON(map[string]any{"agent": c.AgentID, "relay": "healthy", "database": "healthy", "hermes": hc.Health(ctx), "local_head": head, "peers": presence, "counts": counts}, nil)
 	default:
 		return usage()
 	}

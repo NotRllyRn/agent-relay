@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"agent-relay/internal/app"
+	"agent-relay/internal/domain"
 	"context"
 	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -42,20 +43,23 @@ type threadArgs struct {
 	Limit    int    `json:"limit,omitempty"`
 }
 type delegateArgs struct {
-	Recipient             string `json:"recipient" jsonschema:"required"`
-	Objective             string `json:"objective" jsonschema:"required"`
-	Context               any    `json:"context,omitempty"`
-	ExpectedDeliverable   string `json:"expected_deliverable,omitempty"`
-	Priority              string `json:"priority,omitempty"`
-	UpdateIntervalMinutes int    `json:"update_interval_minutes,omitempty"`
+	Recipient             string               `json:"recipient" jsonschema:"required"`
+	Objective             string               `json:"objective" jsonschema:"required"`
+	Context               any                  `json:"context,omitempty"`
+	ExpectedDeliverable   string               `json:"expected_deliverable,omitempty"`
+	Priority              string               `json:"priority,omitempty"`
+	UpdateIntervalMinutes int                  `json:"update_interval_minutes,omitempty"`
+	ArtifactRefs          []domain.ArtifactRef `json:"artifact_refs,omitempty"`
 }
 type updateArgs struct {
-	TaskID      string `json:"task_id" jsonschema:"required"`
-	Status      string `json:"status,omitempty"`
-	Summary     string `json:"summary" jsonschema:"required"`
-	NextStep    string `json:"next_step,omitempty"`
-	Blocker     string `json:"blocker,omitempty"`
-	FinalResult string `json:"final_result,omitempty"`
+	TaskID       string               `json:"task_id" jsonschema:"required"`
+	Status       string               `json:"status,omitempty"`
+	Summary      string               `json:"summary" jsonschema:"required"`
+	NextStep     string               `json:"next_step,omitempty"`
+	Blocker      string               `json:"blocker,omitempty"`
+	FinalResult  string               `json:"final_result,omitempty"`
+	Meaningful   bool                 `json:"meaningful,omitempty"`
+	ArtifactRefs []domain.ArtifactRef `json:"artifact_refs,omitempty"`
 }
 type listTaskArgs struct {
 	Status     string `json:"status,omitempty"`
@@ -84,31 +88,31 @@ func New(service *app.Service, version string) *Server {
 		e := service.Acknowledge(ctx, a.MessageID)
 		return nil, map[string]bool{"acknowledged": e == nil}, e
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "relay_inbox", Description: "List relay messages"}, func(ctx context.Context, _ *mcp.CallToolRequest, a inboxArgs) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_inbox", Description: "List relay messages", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a inboxArgs) (*mcp.CallToolResult, any, error) {
 		v, e := service.Store.Messages(ctx, a.ThreadID, a.UnacknowledgedOnly, a.Limit)
 		return nil, v, e
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "relay_get_thread", Description: "Get messages in a relay thread"}, func(ctx context.Context, _ *mcp.CallToolRequest, a threadArgs) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_get_thread", Description: "Get messages in a relay thread", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a threadArgs) (*mcp.CallToolResult, any, error) {
 		v, e := service.Store.Messages(ctx, a.ThreadID, false, a.Limit)
 		return nil, v, e
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_delegate_task", Description: "Delegate a durable task to a peer"}, func(ctx context.Context, _ *mcp.CallToolRequest, a delegateArgs) (*mcp.CallToolResult, any, error) {
-		v, e := service.Delegate(ctx, app.DelegateInput{Recipient: a.Recipient, Objective: a.Objective, Context: a.Context, ExpectedDeliverable: a.ExpectedDeliverable, Priority: a.Priority, UpdateIntervalMinutes: a.UpdateIntervalMinutes})
+		v, e := service.Delegate(ctx, app.DelegateInput{Recipient: a.Recipient, Objective: a.Objective, Context: a.Context, ExpectedDeliverable: a.ExpectedDeliverable, Priority: a.Priority, UpdateIntervalMinutes: a.UpdateIntervalMinutes, ArtifactRefs: a.ArtifactRefs})
 		return nil, v, e
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_update_task", Description: "Update an assigned relay task"}, func(ctx context.Context, _ *mcp.CallToolRequest, a updateArgs) (*mcp.CallToolResult, any, error) {
-		v, e := service.UpdateTask(ctx, a.TaskID, a.Status, a.Summary, a.NextStep, a.Blocker, a.FinalResult)
+		v, e := service.UpdateTask(ctx, a.TaskID, a.Status, a.Summary, a.NextStep, a.Blocker, a.FinalResult, a.Meaningful, a.ArtifactRefs)
 		return nil, v, e
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "relay_list_tasks", Description: "List relay tasks"}, func(ctx context.Context, _ *mcp.CallToolRequest, a listTaskArgs) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_list_tasks", Description: "List relay tasks", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a listTaskArgs) (*mcp.CallToolResult, any, error) {
 		v, e := service.Store.ListTasks(ctx, a.Status, a.AssignedTo, a.Limit)
 		return nil, v, e
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "relay_search_history", Description: "Search relay message and task history"}, func(ctx context.Context, _ *mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_search_history", Description: "Search relay message and task history", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, any, error) {
 		v, e := service.Store.Search(ctx, a.Query, a.Limit)
 		return nil, v, e
 	})
-	mcp.AddTool(s, &mcp.Tool{Name: "relay_ping_peer", Description: "Actively check peer relay and Hermes health"}, func(ctx context.Context, _ *mcp.CallToolRequest, a pingArgs) (*mcp.CallToolResult, any, error) {
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_ping_peer", Description: "Actively check peer relay and Hermes health", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, func(ctx context.Context, _ *mcp.CallToolRequest, a pingArgs) (*mcp.CallToolResult, any, error) {
 		if service.PingPeer == nil {
 			return nil, nil, fmt.Errorf("peer ping unavailable")
 		}

@@ -28,39 +28,25 @@ type Peer struct {
 	InboundToken    string `json:"-"`
 }
 type Config struct {
-	AgentID, DataDir, PeerListen, MCPListen                                          string
-	SyncIntervalSeconds, MaxEvents, MaxRequestBytes, MaxEventPayload, MaxMessageBody int
-	AllowInsecurePublicHTTP                                                          bool
-	LogFormat                                                                        string
-	Hermes                                                                           Hermes
-	Discord                                                                          Discord
-	Peers                                                                            []Peer
+	AgentID                 string  `json:"agent_id"`
+	DataDir                 string  `json:"data_dir"`
+	PeerListen              string  `json:"peer_listen"`
+	MCPListen               string  `json:"mcp_listen"`
+	SyncIntervalSeconds     int     `json:"sync_interval_seconds"`
+	MaxEvents               int     `json:"max_events"`
+	MaxRequestBytes         int     `json:"max_request_bytes"`
+	MaxEventPayload         int     `json:"max_event_payload"`
+	MaxMessageBody          int     `json:"max_message_body"`
+	MaxReplyDepth           int     `json:"max_reply_depth"`
+	ThreadRateLimit         int     `json:"thread_rate_limit"`
+	ThreadRateWindowSeconds int     `json:"thread_rate_window_seconds"`
+	AllowInsecurePublicHTTP bool    `json:"allow_insecure_public_http"`
+	LogFormat               string  `json:"log_format"`
+	Hermes                  Hermes  `json:"hermes"`
+	Discord                 Discord `json:"discord"`
+	Peers                   []Peer  `json:"peers"`
 }
 
-func (c *Config) UnmarshalJSON(b []byte) error {
-	type raw struct {
-		AgentID             string  `json:"agent_id"`
-		DataDir             string  `json:"data_dir"`
-		PeerListen          string  `json:"peer_listen"`
-		MCPListen           string  `json:"mcp_listen"`
-		SyncIntervalSeconds int     `json:"sync_interval_seconds"`
-		MaxEvents           int     `json:"max_events"`
-		MaxRequestBytes     int     `json:"max_request_bytes"`
-		MaxEventPayload     int     `json:"max_event_payload"`
-		MaxMessageBody      int     `json:"max_message_body"`
-		Allow               bool    `json:"allow_insecure_public_http"`
-		LogFormat           string  `json:"log_format"`
-		Hermes              Hermes  `json:"hermes"`
-		Discord             Discord `json:"discord"`
-		Peers               []Peer  `json:"peers"`
-	}
-	var r raw
-	if err := json.Unmarshal(b, &r); err != nil {
-		return err
-	}
-	*c = Config{r.AgentID, r.DataDir, r.PeerListen, r.MCPListen, r.SyncIntervalSeconds, r.MaxEvents, r.MaxRequestBytes, r.MaxEventPayload, r.MaxMessageBody, r.Allow, r.LogFormat, r.Hermes, r.Discord, r.Peers}
-	return nil
-}
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -104,6 +90,15 @@ func (c *Config) defaults() {
 	if c.MaxMessageBody == 0 {
 		c.MaxMessageBody = 64 << 10
 	}
+	if c.MaxReplyDepth == 0 {
+		c.MaxReplyDepth = 12
+	}
+	if c.ThreadRateLimit == 0 {
+		c.ThreadRateLimit = 20
+	}
+	if c.ThreadRateWindowSeconds == 0 {
+		c.ThreadRateWindowSeconds = 600
+	}
 	if c.Discord.Target == "" {
 		c.Discord.Target = "discord"
 	}
@@ -115,7 +110,14 @@ func (c *Config) Validate() error {
 	if c.AgentID == "" || c.DataDir == "" {
 		return fmt.Errorf("agent_id and data_dir are required")
 	}
-	if host, _, e := net.SplitHostPort(c.MCPListen); e != nil || !(host == "127.0.0.1" || host == "localhost" || host == "::1") {
+	if c.MaxReplyDepth < 1 || c.ThreadRateLimit < 1 || c.ThreadRateWindowSeconds < 1 {
+		return fmt.Errorf("message loop limits must be positive")
+	}
+	if c.SyncIntervalSeconds < 1 || c.MaxEvents < 1 || c.MaxRequestBytes < 1 || c.MaxEventPayload < 1 || c.MaxMessageBody < 1 {
+		return fmt.Errorf("size and interval limits must be positive")
+	}
+	host, _, e := net.SplitHostPort(c.MCPListen)
+	if e != nil || !(host == "127.0.0.1" || host == "localhost" || host == "::1") {
 		return fmt.Errorf("mcp_listen must be loopback")
 	}
 	seen := map[string]bool{}
@@ -125,7 +127,7 @@ func (c *Config) Validate() error {
 		}
 		seen[p.ID] = true
 		u, e := url.Parse(p.URL)
-		if e != nil || u.Host == "" {
+		if e != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return fmt.Errorf("invalid peer URL")
 		}
 		if u.Scheme == "http" && !c.AllowInsecurePublicHTTP && !privateHost(u.Hostname()) {

@@ -1,6 +1,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -30,7 +31,10 @@ type RelayStatus struct {
 	UptimeSeconds int64  `json:"uptime_seconds"`
 	Database      string `json:"database"`
 }
-type ReplicationStatus struct{ SelfHead, StoredCallerHead int64 }
+type ReplicationStatus struct {
+	SelfHead         int64 `json:"self_head"`
+	StoredCallerHead int64 `json:"stored_caller_head"`
+}
 type SyncRequest struct {
 	KnownPeerSeq int64          `json:"known_peer_seq"`
 	Events       []domain.Event `json:"events"`
@@ -241,51 +245,73 @@ type Client struct {
 }
 
 func (c *Client) Sync(ctx context.Context, peerID, baseURL, token string) error {
-	cursor, e := c.Store.Cursor(ctx, peerID, c.LocalID)
-	if e != nil {
-		return e
+	for batch := 0; batch < 10000; batch++ {
+		more, err := c.syncOnce(ctx, peerID, baseURL, token)
+		if err != nil {
+			_ = c.Store.RecordPeerError(ctx, peerID, err)
+			return err
+		}
+		if !more {
+			return c.Store.RecordPeerSuccess(ctx, peerID, map[string]any{"synced": true})
+		}
 	}
-	known, _, e := c.Store.Head(ctx, peerID)
-	if e != nil {
-		return e
+	return fmt.Errorf("sync exceeded batch safety limit")
+}
+func (c *Client) syncOnce(ctx context.Context, peerID, baseURL, token string) (bool, error) {
+	cursor, err := c.Store.Cursor(ctx, peerID, c.LocalID)
+	if err != nil {
+		return false, err
 	}
-	events, e := c.Store.EventsAfter(ctx, c.LocalID, cursor, c.MaxEvents)
-	if e != nil {
-		return e
+	known, _, err := c.Store.Head(ctx, peerID)
+	if err != nil {
+		return false, err
 	}
-	body, _ := json.Marshal(SyncRequest{known, events})
-	req, e := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(baseURL, "/")+"/v1/sync", strings.NewReader(string(body)))
-	if e != nil {
-		return e
+	events, err := c.Store.EventsAfter(ctx, c.LocalID, cursor, c.MaxEvents)
+	if err != nil {
+		return false, err
+	}
+	body, err := json.Marshal(SyncRequest{KnownPeerSeq: known, Events: events})
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+"/v1/sync", bytes.NewReader(body))
+	if err != nil {
+		return false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	resp, e := c.HTTP.Do(req)
-	if e != nil {
-		return e
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return false, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		var er ErrorResponse
-		if json.Unmarshal(b, &er) == nil && er.Error == "event_gap" {
-			if n, ok := er.Details["expected_seq"].(float64); ok && n > 0 {
-				return fmt.Errorf("peer gap expects %d", int64(n))
+		var apiErr ErrorResponse
+		if json.Unmarshal(b, &apiErr) == nil && apiErr.Error == "event_gap" {
+			if n, ok := apiErr.Details["expected_seq"].(float64); ok && n > 0 {
+				if err = c.Store.ResetCursor(ctx, peerID, c.LocalID, int64(n)-1); err != nil {
+					return false, err
+				}
+				return true, nil
 			}
 		}
-		return fmt.Errorf("sync HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+		return false, fmt.Errorf("sync HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 	}
 	var out SyncResponse
-	if e = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&out); e != nil {
-		return e
+	if err = json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&out); err != nil {
+		return false, err
 	}
-	if e = c.Store.Ingest(ctx, peerID, out.Events); e != nil {
-		return e
+	if err = c.Store.Ingest(ctx, peerID, out.Events); err != nil {
+		return false, err
 	}
-	if e = c.Store.SetCursor(ctx, peerID, c.LocalID, out.AcceptedCallerThrough); e != nil {
-		return e
+	if err = c.Store.SetCursor(ctx, peerID, c.LocalID, out.AcceptedCallerThrough); err != nil {
+		return false, err
 	}
-	return c.Store.MarkSent(ctx, out.AcceptedCallerThrough)
+	if err = c.Store.MarkSent(ctx, out.AcceptedCallerThrough); err != nil {
+		return false, err
+	}
+	return out.More || len(events) == c.MaxEvents, nil
 }
 func (c *Client) Ping(ctx context.Context, baseURL, token string) (Status, time.Duration, error) {
 	start := time.Now()
