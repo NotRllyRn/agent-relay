@@ -50,6 +50,7 @@ func TestSyncConvergesAndRejectsSpoof(t *testing.T) {
 	rr := httptest.NewRecorder()
 	r := httptest.NewRequest("POST", "/v1/sync", jsonBody(t, req))
 	r.Header.Set("Authorization", "Bearer secret")
+	r.Header.Set("Content-Type", "application/json")
 	((&Server{Store: b, LocalID: "b", Version: "test", Credentials: []PeerCredential{{"a", "secret"}}, MaxBody: 2 << 20, MaxEvents: 256}).Handler()).ServeHTTP(rr, r)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("spoof status %d", rr.Code)

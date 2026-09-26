@@ -158,6 +158,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
 	caller := r.Context().Value(peerKey{}).(string)
+	mediaType := strings.ToLower(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]))
+	if mediaType != "application/json" {
+		writeErr(w, http.StatusUnsupportedMediaType, "invalid_event", "Content-Type must be application/json", nil)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, int64(s.MaxBody))
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
@@ -170,6 +175,10 @@ func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
 			status = 413
 		}
 		writeErr(w, status, code, "invalid sync request", nil)
+		return
+	}
+	if e := d.Decode(&struct{}{}); e != io.EOF {
+		writeErr(w, http.StatusBadRequest, "invalid_event", "request must contain one JSON object", nil)
 		return
 	}
 	if len(req.Events) > s.MaxEvents {
