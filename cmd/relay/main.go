@@ -139,7 +139,7 @@ func serveCmd(args []string) error {
 	defer s.Close()
 	hclient := &hermes.Client{BaseURL: c.Hermes.BaseURL, APIKey: os.Getenv(c.Hermes.APIKeyEnv), HTTP: httpClient()}
 	wake := make(chan struct{}, 1)
-	svc := &app.Service{LocalID: c.AgentID, Store: s, MaxMessageBody: c.MaxMessageBody, NotifyTasks: c.Discord.Enabled, WakeSync: func() {
+	svc := &app.Service{LocalID: c.AgentID, Store: s, MaxMessageBody: c.MaxMessageBody, NotifyTasks: c.Discord.Enabled, DefaultTaskInterval: time.Duration(c.Discord.MaxSilenceMinutes) * time.Minute, WakeSync: func() {
 		select {
 		case wake <- struct{}{}:
 		default:
@@ -162,6 +162,15 @@ func serveCmd(args []string) error {
 		}
 	}()
 	pc := &peer.Client{HTTP: httpClient(), LocalID: c.AgentID, Store: s, MaxEvents: c.MaxEvents}
+	svc.PingPeer = func(pctx context.Context, id string) (any, error) {
+		for _, configured := range c.Peers {
+			if configured.ID == id {
+				status, latency, err := pc.Ping(pctx, configured.URL, configured.Token)
+				return map[string]any{"peer": id, "reachable": err == nil, "latency_ms": latency.Milliseconds(), "status": status}, err
+			}
+		}
+		return nil, fmt.Errorf("unknown peer %q", id)
+	}
 	dw := &hermes.Worker{Store: s, Client: hclient, LocalID: c.AgentID}
 	nw := &notify.Worker{Store: s, Sender: notify.HermesSender{}, Target: c.Discord.Target}
 	go workers(ctx, c, pc, dw, nw, wake)
@@ -180,8 +189,10 @@ func serveCmd(args []string) error {
 func workers(ctx context.Context, c *config.Config, pc *peer.Client, dw *hermes.Worker, nw *notify.Worker, wake <-chan struct{}) {
 	tick := time.NewTicker(time.Duration(c.SyncIntervalSeconds) * time.Second)
 	fast := time.NewTicker(2 * time.Second)
+	watchdog := time.NewTicker(time.Minute)
 	defer tick.Stop()
 	defer fast.Stop()
+	defer watchdog.Stop()
 	syncAll := func() {
 		for _, p := range c.Peers {
 			if e := pc.Sync(ctx, p.ID, p.URL, p.Token); e != nil {
@@ -199,9 +210,22 @@ func workers(ctx context.Context, c *config.Config, pc *peer.Client, dw *hermes.
 		case <-wake:
 			syncAll()
 		case <-fast.C:
-			dw.DeliverOnce(ctx)
+			if e := dw.DeliverOnce(ctx); e != nil {
+				slog.Warn("message delivery failed", "error", e)
+			}
+			if e := dw.DeliverTasksOnce(ctx); e != nil {
+				slog.Warn("task delivery failed", "error", e)
+			}
 			if c.Discord.Enabled {
-				nw.Once(ctx)
+				if e := nw.Once(ctx); e != nil {
+					slog.Warn("notification failed", "error", e)
+				}
+			}
+		case <-watchdog.C:
+			if c.Discord.Enabled {
+				if e := dw.WatchdogOnce(ctx, time.Duration(c.Discord.MaxSilenceMinutes)*time.Minute); e != nil {
+					slog.Warn("progress watchdog failed", "error", e)
+				}
 			}
 		}
 	}

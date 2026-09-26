@@ -3,6 +3,7 @@ package mcp
 import (
 	"agent-relay/internal/app"
 	"context"
+	"fmt"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"net/http"
 	"time"
@@ -65,6 +66,9 @@ type searchArgs struct {
 	Query string `json:"query" jsonschema:"required"`
 	Limit int    `json:"limit,omitempty"`
 }
+type pingArgs struct {
+	PeerID string `json:"peer_id" jsonschema:"required"`
+}
 
 func New(service *app.Service, version string) *Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-relay", Version: version}, nil)
@@ -102,6 +106,13 @@ func New(service *app.Service, version string) *Server {
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_search_history", Description: "Search relay message and task history"}, func(ctx context.Context, _ *mcp.CallToolRequest, a searchArgs) (*mcp.CallToolResult, any, error) {
 		v, e := service.Store.Search(ctx, a.Query, a.Limit)
+		return nil, v, e
+	})
+	mcp.AddTool(s, &mcp.Tool{Name: "relay_ping_peer", Description: "Actively check peer relay and Hermes health"}, func(ctx context.Context, _ *mcp.CallToolRequest, a pingArgs) (*mcp.CallToolResult, any, error) {
+		if service.PingPeer == nil {
+			return nil, nil, fmt.Errorf("peer ping unavailable")
+		}
+		v, e := service.PingPeer(ctx, a.PeerID)
 		return nil, v, e
 	})
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{JSONResponse: true, SessionTimeout: 2 * time.Hour})

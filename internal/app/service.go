@@ -10,11 +10,16 @@ import (
 )
 
 type Service struct {
-	LocalID        string
-	Store          *store.Store
-	MaxMessageBody int
-	WakeSync       func()
-	NotifyTasks    bool
+	LocalID             string
+	Store               *store.Store
+	MaxMessageBody      int
+	WakeSync            func()
+	NotifyTasks         bool
+	MaxReplyDepth       int
+	ThreadRateLimit     int
+	ThreadRateWindow    time.Duration
+	PingPeer            func(context.Context, string) (any, error)
+	DefaultTaskInterval time.Duration
 }
 type SendInput struct {
 	Recipient, Subject, Body, Kind, Priority string
@@ -59,8 +64,26 @@ func (s *Service) Reply(ctx context.Context, thread, parent, body, kind, priorit
 	if p.ThreadID != thread {
 		return SendResult{}, fmt.Errorf("parent does not belong to thread")
 	}
-	if p.ReplyDepth >= 12 {
+	maxDepth := s.MaxReplyDepth
+	if maxDepth <= 0 {
+		maxDepth = 12
+	}
+	if p.ReplyDepth >= maxDepth {
 		return SendResult{}, fmt.Errorf("maximum reply depth exceeded")
+	}
+	limit, window := s.ThreadRateLimit, s.ThreadRateWindow
+	if limit <= 0 {
+		limit = 20
+	}
+	if window <= 0 {
+		window = 10 * time.Minute
+	}
+	recent, e := s.Store.CountRecentMessages(ctx, s.LocalID, thread, time.Now().Add(-window))
+	if e != nil {
+		return SendResult{}, e
+	}
+	if recent >= limit {
+		return SendResult{}, fmt.Errorf("thread send rate exceeded: maximum %d messages per %s", limit, window)
 	}
 	recipient := p.SenderID
 	if recipient == s.LocalID {
@@ -120,7 +143,11 @@ func (s *Service) Delegate(ctx context.Context, in DelegateInput) (domain.Task, 
 		in.Priority = "normal"
 	}
 	if in.UpdateIntervalMinutes <= 0 {
-		in.UpdateIntervalMinutes = 60
+		interval := s.DefaultTaskInterval
+		if interval <= 0 {
+			interval = time.Hour
+		}
+		in.UpdateIntervalMinutes = int(interval / time.Minute)
 	}
 	t := domain.Task{TaskID: tid, ThreadID: thr, CreatedBy: s.LocalID, AssignedTo: in.Recipient, Objective: in.Objective, Context: raw, ExpectedDeliverable: in.ExpectedDeliverable, Priority: in.Priority, Status: "proposed", UpdateIntervalSeconds: in.UpdateIntervalMinutes * 60, CreatedAt: time.Now().UTC()}
 	_, e = s.Store.Append(ctx, "task.created", "task", tid, thr, "", t)

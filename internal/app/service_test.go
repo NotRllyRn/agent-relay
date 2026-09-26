@@ -45,3 +45,15 @@ func TestTaskLifecycleOwnership(t *testing.T) {
 		t.Fatal("creator changed assignee state")
 	}
 }
+func TestReplyRateLimit(t *testing.T) {
+	ctx := context.Background()
+	s := svc(t, "a")
+	s.ThreadRateLimit = 1
+	first, err := s.Send(ctx, SendInput{Recipient: "b", Body: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Reply(ctx, first.ThreadID, first.MessageID, "two", "", "", false); err == nil {
+		t.Fatal("reply exceeded per-thread rate but was accepted")
+	}
+}

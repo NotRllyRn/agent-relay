@@ -27,6 +27,11 @@ func (s *Store) HasEvent(ctx context.Context, eventType, aggregate string) (bool
 	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events WHERE event_type=? AND aggregate_id=?", eventType, aggregate).Scan(&n)
 	return n > 0, err
 }
+func (s *Store) CountRecentMessages(ctx context.Context, sender, thread string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM messages WHERE sender_id=? AND thread_id=? AND created_at>=?", sender, thread, since.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return n, err
+}
 
 type TaskView struct {
 	domain.Task
@@ -160,4 +165,13 @@ func (s *Store) FinishDelivery(ctx context.Context, id string) error {
 func (s *Store) RetryDelivery(ctx context.Context, id string, attempt int, err error, next time.Time) error {
 	_, e := s.db.ExecContext(ctx, "UPDATE delivery_jobs SET attempts=?,last_error=?,next_attempt_at=? WHERE message_id=?", attempt, fmt.Sprint(err), next.UTC().Format(time.RFC3339Nano), id)
 	return e
+}
+func (s *Store) HasProgressRequest(ctx context.Context, key string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM progress_requests WHERE request_key=?", key).Scan(&n)
+	return n > 0, err
+}
+func (s *Store) MarkProgressRequest(ctx context.Context, key, taskID string) error {
+	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO progress_requests VALUES(?,?,?)", key, taskID, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
 }

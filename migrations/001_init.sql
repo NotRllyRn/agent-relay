@@ -12,3 +12,6 @@ CREATE TABLE IF NOT EXISTS peer_state(peer_id TEXT PRIMARY KEY,last_seen_at TEXT
 CREATE TABLE IF NOT EXISTS hermes_threads(thread_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS delivery_jobs(message_id TEXT PRIMARY KEY,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT);
 CREATE TABLE IF NOT EXISTS notification_jobs(notification_id TEXT PRIMARY KEY,task_id TEXT,body TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS pending_projections(event_id TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS progress_requests(request_key TEXT PRIMARY KEY,task_id TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS task_delivery_jobs(task_id TEXT PRIMARY KEY,state TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT);

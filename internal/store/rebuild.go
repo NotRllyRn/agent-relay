@@ -3,15 +3,12 @@ package store
 import (
 	"agent-relay/internal/domain"
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 )
-
-type eventWrap struct {
-	priority int
-	event    domain.Event
-}
 
 func (s *Store) RebuildProjections(ctx context.Context, backupPath string) error {
 	if backupPath != "" {
@@ -35,45 +32,67 @@ func (s *Store) RebuildProjections(ctx context.Context, backupPath string) error
 		}
 		origins = append(origins, o)
 	}
+	if e = rows.Err(); e != nil {
+		rows.Close()
+		return e
+	}
 	rows.Close()
-	var events []eventWrap
+	var events []domain.Event
 	for _, o := range origins {
 		es, er := s.EventsAfter(ctx, o, 0, 1<<30)
 		if er != nil {
 			return er
 		}
-		for _, ev := range es {
-			p := 1
-			if ev.EventType == "message.created" || ev.EventType == "task.created" {
-				p = 0
-			}
-			events = append(events, eventWrap{p, ev})
-		}
+		events = append(events, es...)
 	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+			if events[i].OriginID == events[j].OriginID {
+				return events[i].OriginSeq < events[j].OriginSeq
+			}
+			return events[i].OriginID < events[j].OriginID
+		}
+		return events[i].CreatedAt.Before(events[j].CreatedAt)
+	})
 	tx, e := s.db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
-	for _, q := range []string{"DELETE FROM messages", "DELETE FROM threads", "DELETE FROM tasks", "DELETE FROM task_progress", "DELETE FROM delivery_jobs", "DELETE FROM notification_jobs"} {
+	for _, q := range []string{"DELETE FROM messages", "DELETE FROM threads", "DELETE FROM tasks", "DELETE FROM task_progress", "DELETE FROM delivery_jobs", "DELETE FROM notification_jobs", "DELETE FROM pending_projections"} {
 		if _, e = tx.ExecContext(ctx, q); e != nil {
 			return e
 		}
 	}
-	for pass := 0; pass < 2; pass++ {
-		for _, w := range events {
-			if w.priority == pass {
-				if e = apply(ctx, tx, w.event); e != nil {
-					return fmt.Errorf("replay %s: %w", w.event.EventID, e)
-				}
+	remaining := append([]domain.Event(nil), events...)
+	for len(remaining) > 0 {
+		next := remaining[:0]
+		progress := false
+		for _, ev := range remaining {
+			e = apply(ctx, tx, ev)
+			if errors.Is(e, errProjectionDependency) {
+				next = append(next, ev)
+				continue
 			}
+			if e != nil {
+				return fmt.Errorf("replay %s: %w", ev.EventID, e)
+			}
+			progress = true
 		}
+		if !progress {
+			ids := make([]string, len(next))
+			for i, ev := range next {
+				ids[i] = ev.EventID
+			}
+			return fmt.Errorf("unresolved projection dependencies: %v", ids)
+		}
+		remaining = append([]domain.Event(nil), next...)
 	}
 	return tx.Commit()
 }
 func (s *Store) Counts(ctx context.Context) (map[string]int64, error) {
 	out := map[string]int64{}
-	for name, q := range map[string]string{"messages": "SELECT COUNT(*) FROM messages", "tasks": "SELECT COUNT(*) FROM tasks", "pending_deliveries": "SELECT COUNT(*) FROM delivery_jobs WHERE state='pending'", "pending_notifications": "SELECT COUNT(*) FROM notification_jobs WHERE state='pending'"} {
+	for name, q := range map[string]string{"messages": "SELECT COUNT(*) FROM messages", "tasks": "SELECT COUNT(*) FROM tasks", "pending_deliveries": "SELECT COUNT(*) FROM delivery_jobs WHERE state='pending'", "pending_notifications": "SELECT COUNT(*) FROM notification_jobs WHERE state='pending'", "pending_projections": "SELECT COUNT(*) FROM pending_projections"} {
 		var n int64
 		if e := s.db.QueryRowContext(ctx, q).Scan(&n); e != nil {
 			return nil, e

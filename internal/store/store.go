@@ -20,6 +20,8 @@ import (
 //go:embed 001_init.sql
 var schema string
 
+var errProjectionDependency = errors.New("projection dependency missing")
+
 type Store struct {
 	db         *sql.DB
 	localID    string
@@ -129,9 +131,12 @@ func (s *Store) Ingest(ctx context.Context, origin string, events []domain.Event
 		if !bytes.Equal(e.PrevHash, h) || !e.ValidateHash() {
 			return domain.ErrDivergence
 		}
-		if er = s.insertApply(ctx, tx, e); er != nil {
+		if er = s.insertRemote(ctx, tx, e); er != nil {
 			return er
 		}
+	}
+	if err = retryPendingProjections(ctx, tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -145,15 +150,76 @@ func headTx(ctx context.Context, tx *sql.Tx, origin string) (int64, []byte, erro
 	return n, h, err
 }
 func (s *Store) insertApply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
+	if err := insertEvent(ctx, tx, e); err != nil {
+		return err
+	}
+	if err := apply(ctx, tx, e); err != nil {
+		return err
+	}
+	return updateHead(ctx, tx, e)
+}
+func (s *Store) insertRemote(ctx context.Context, tx *sql.Tx, e domain.Event) error {
+	if err := insertEvent(ctx, tx, e); err != nil {
+		return err
+	}
+	err := apply(ctx, tx, e)
+	if errors.Is(err, errProjectionDependency) {
+		if _, qerr := tx.ExecContext(ctx, "INSERT INTO pending_projections(event_id,reason,created_at) VALUES(?,?,?)", e.EventID, err.Error(), time.Now().UTC().Format(time.RFC3339Nano)); qerr != nil {
+			return qerr
+		}
+	} else if err != nil {
+		return err
+	}
+	return updateHead(ctx, tx, e)
+}
+func insertEvent(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 	_, err := tx.ExecContext(ctx, "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", e.OriginID, e.OriginSeq, e.EventID, e.EventType, e.AggregateType, e.AggregateID, null(e.CorrelationID), null(e.CausationEventID), e.CreatedAt.Format(time.RFC3339Nano), []byte(e.PayloadJSON), e.PrevHash, e.EventHash)
-	if err != nil {
-		return err
-	}
-	if err = apply(ctx, tx, e); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, "INSERT INTO origin_heads VALUES(?,?,?,?) ON CONFLICT(origin_id) DO UPDATE SET head_seq=excluded.head_seq,head_hash=excluded.head_hash,updated_at=excluded.updated_at", e.OriginID, e.OriginSeq, e.EventHash, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
+}
+func updateHead(ctx context.Context, tx *sql.Tx, e domain.Event) error {
+	_, err := tx.ExecContext(ctx, "INSERT INTO origin_heads VALUES(?,?,?,?) ON CONFLICT(origin_id) DO UPDATE SET head_seq=excluded.head_seq,head_hash=excluded.head_hash,updated_at=excluded.updated_at", e.OriginID, e.OriginSeq, e.EventHash, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
+}
+func retryPendingProjections(ctx context.Context, tx *sql.Tx) error {
+	for {
+		rows, err := tx.QueryContext(ctx, `SELECT e.origin_id,e.origin_seq,e.event_id,e.event_type,e.aggregate_type,e.aggregate_id,COALESCE(e.correlation_id,''),COALESCE(e.causation_event_id,''),e.created_at,e.payload_json,e.prev_hash,e.event_hash FROM events e JOIN pending_projections p ON p.event_id=e.event_id ORDER BY e.created_at,e.origin_id,e.origin_seq`)
+		if err != nil {
+			return err
+		}
+		var pending []domain.Event
+		for rows.Next() {
+			var e domain.Event
+			var created string
+			if err = rows.Scan(&e.OriginID, &e.OriginSeq, &e.EventID, &e.EventType, &e.AggregateType, &e.AggregateID, &e.CorrelationID, &e.CausationEventID, &created, &e.PayloadJSON, &e.PrevHash, &e.EventHash); err != nil {
+				rows.Close()
+				return err
+			}
+			e.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			pending = append(pending, e)
+		}
+		rows.Close()
+		progress := false
+		for _, e := range pending {
+			err = apply(ctx, tx, e)
+			if errors.Is(err, errProjectionDependency) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if _, err = tx.ExecContext(ctx, "DELETE FROM pending_projections WHERE event_id=?", e.EventID); err != nil {
+				return err
+			}
+			progress = true
+		}
+		if !progress {
+			return nil
+		}
+	}
 }
 func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 	switch e.EventType {
@@ -162,7 +228,24 @@ func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 		if err := json.Unmarshal(e.PayloadJSON, &m); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, "INSERT INTO threads(thread_id,peer_id,subject,created_at,last_message_at) VALUES(?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET last_message_at=excluded.last_message_at", m.ThreadID, peer(m, e.OriginID), null(m.Subject), m.CreatedAt.Format(time.RFC3339Nano), m.CreatedAt.Format(time.RFC3339Nano))
+		if m.SenderID != e.OriginID {
+			return fmt.Errorf("message sender not owned by origin")
+		}
+		if err := domain.ValidateMessage(m, 64<<10); err != nil {
+			return err
+		}
+		if m.ReplyToMessageID != "" {
+			var parentThread string
+			if err := tx.QueryRowContext(ctx, "SELECT thread_id FROM messages WHERE message_id=?", m.ReplyToMessageID).Scan(&parentThread); errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: parent message %s", errProjectionDependency, m.ReplyToMessageID)
+			} else if err != nil {
+				return err
+			}
+			if parentThread != m.ThreadID {
+				return fmt.Errorf("reply parent belongs to another thread")
+			}
+		}
+		_, err := tx.ExecContext(ctx, "INSERT INTO threads(thread_id,peer_id,subject,created_at,last_message_at) VALUES(?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET last_message_at=MAX(last_message_at,excluded.last_message_at)", m.ThreadID, peer(m, e.OriginID), null(m.Subject), m.CreatedAt.Format(time.RFC3339Nano), m.CreatedAt.Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
@@ -176,20 +259,28 @@ func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 		if err := json.Unmarshal(e.PayloadJSON, &p); err != nil {
 			return err
 		}
-		col := map[string]string{"message.received": "received_at", "message.delivered": "delivered_at", "message.acknowledged": "acknowledged_at"}[e.EventType]
-		r, err := tx.ExecContext(ctx, "UPDATE messages SET "+col+"=COALESCE("+col+",?) WHERE message_id=?", p.At.Format(time.RFC3339Nano), p.MessageID)
-		if err != nil {
+		var recipient string
+		if err := tx.QueryRowContext(ctx, "SELECT recipient_id FROM messages WHERE message_id=?", p.MessageID).Scan(&recipient); errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: message %s", errProjectionDependency, p.MessageID)
+		} else if err != nil {
 			return err
 		}
-		n, _ := r.RowsAffected()
-		if n == 0 {
-			return fmt.Errorf("receipt for unknown message")
+		if recipient != e.OriginID {
+			return fmt.Errorf("receipt not owned by recipient")
+		}
+		col := map[string]string{"message.received": "received_at", "message.delivered": "delivered_at", "message.acknowledged": "acknowledged_at"}[e.EventType]
+		_, err := tx.ExecContext(ctx, "UPDATE messages SET "+col+"=COALESCE("+col+",?) WHERE message_id=?", p.At.Format(time.RFC3339Nano), p.MessageID)
+		if err != nil {
+			return err
 		}
 		return nil
 	case "task.created":
 		var t domain.Task
 		if err := json.Unmarshal(e.PayloadJSON, &t); err != nil {
 			return err
+		}
+		if t.CreatedBy != e.OriginID {
+			return fmt.Errorf("task creator not owned by origin")
 		}
 		_, err := tx.ExecContext(ctx, "INSERT INTO threads(thread_id,peer_id,subject,created_at,last_message_at) VALUES(?,?,?,?,?) ON CONFLICT(thread_id) DO NOTHING", t.ThreadID, peerTask(t, e.OriginID), t.Objective, t.CreatedAt.Format(time.RFC3339Nano), t.CreatedAt.Format(time.RFC3339Nano))
 		if err != nil {
@@ -206,10 +297,22 @@ func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 		if tid == "" {
 			return domain.ErrInvalid
 		}
+		var owner, assignee, old string
+		if err := tx.QueryRowContext(ctx, "SELECT created_by,assigned_to,status FROM tasks WHERE task_id=?", tid).Scan(&owner, &assignee, &old); errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: task %s", errProjectionDependency, tid)
+		} else if err != nil {
+			return err
+		}
 		if e.EventType == "task.cancel_requested" {
+			if e.OriginID != owner {
+				return fmt.Errorf("cancellation not owned by creator")
+			}
 			return nil
 		}
 		if e.EventType == "task.progress" {
+			if e.OriginID != assignee {
+				return fmt.Errorf("task progress not owned by assignee")
+			}
 			summary, _ := p["summary"].(string)
 			next, _ := p["next_step"].(string)
 			_, err := tx.ExecContext(ctx, "INSERT INTO task_progress VALUES(?,?,?,?,?)", e.EventID, tid, summary, null(next), e.CreatedAt.Format(time.RFC3339Nano))
@@ -219,10 +322,7 @@ func apply(ctx context.Context, tx *sql.Tx, e domain.Event) error {
 			return err
 		}
 		status := map[string]string{"task.accepted": "accepted", "task.started": "in_progress", "task.blocked": "blocked", "task.completed": "completed", "task.failed": "failed", "task.declined": "declined", "task.cancelled": "cancelled"}[e.EventType]
-		var old, assignee string
-		if err := tx.QueryRowContext(ctx, "SELECT status,assigned_to FROM tasks WHERE task_id=?", tid).Scan(&old, &assignee); err != nil {
-			return err
-		}
+
 		if e.OriginID != assignee {
 			return fmt.Errorf("task state not owned by assignee")
 		}

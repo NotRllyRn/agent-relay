@@ -188,6 +188,13 @@ func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, event := range req.Events {
+		if event.EventType == "task.created" {
+			if err := s.Store.QueueTaskDelivery(r.Context(), event.AggregateID); err != nil {
+				writeErr(w, 500, "internal_error", "could not queue task delivery", nil)
+				return
+			}
+			continue
+		}
 		if event.EventType != "message.created" {
 			continue
 		}
