@@ -69,7 +69,7 @@ type searchArgs struct {
 func New(service *app.Service, version string) *Server {
 	s := mcp.NewServer(&mcp.Implementation{Name: "agent-relay", Version: version}, nil)
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_send_message", Description: "Send a durable message to a configured peer"}, func(ctx context.Context, _ *mcp.CallToolRequest, a sendArgs) (*mcp.CallToolResult, any, error) {
-		v, e := service.Send(ctx, app.SendInput{a.Recipient, a.Subject, a.Body, a.Kind, a.Priority, a.AckRequired})
+		v, e := service.Send(ctx, app.SendInput{Recipient: a.Recipient, Subject: a.Subject, Body: a.Body, Kind: a.Kind, Priority: a.Priority, AckRequired: a.AckRequired})
 		return nil, v, e
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_reply", Description: "Reply in an existing relay thread"}, func(ctx context.Context, _ *mcp.CallToolRequest, a replyArgs) (*mcp.CallToolResult, any, error) {
@@ -89,7 +89,7 @@ func New(service *app.Service, version string) *Server {
 		return nil, v, e
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_delegate_task", Description: "Delegate a durable task to a peer"}, func(ctx context.Context, _ *mcp.CallToolRequest, a delegateArgs) (*mcp.CallToolResult, any, error) {
-		v, e := service.Delegate(ctx, app.DelegateInput{a.Recipient, a.Objective, a.Context, a.ExpectedDeliverable, a.Priority, a.UpdateIntervalMinutes})
+		v, e := service.Delegate(ctx, app.DelegateInput{Recipient: a.Recipient, Objective: a.Objective, Context: a.Context, ExpectedDeliverable: a.ExpectedDeliverable, Priority: a.Priority, UpdateIntervalMinutes: a.UpdateIntervalMinutes})
 		return nil, v, e
 	})
 	mcp.AddTool(s, &mcp.Tool{Name: "relay_update_task", Description: "Update an assigned relay task"}, func(ctx context.Context, _ *mcp.CallToolRequest, a updateArgs) (*mcp.CallToolResult, any, error) {

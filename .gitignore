@@ -1,0 +1,7 @@
+relay
+dist/
+*.db
+*.db-shm
+*.db-wal
+config.json
+.env

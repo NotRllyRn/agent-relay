@@ -1,0 +1,8 @@
+relay.example.com {
+    encode zstd gzip
+    @relay path /healthz /v1/status /v1/sync
+    handle @relay {
+        reverse_proxy 127.0.0.1:7419
+    }
+    respond 404
+}

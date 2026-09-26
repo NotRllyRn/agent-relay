@@ -59,6 +59,23 @@ func configFlag(name string, args []string) (*config.Config, error) {
 	}
 	return config.Load(*p)
 }
+func operatorConfig(args []string) (*config.Config, []string, error) {
+	path := "config.json"
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--config" {
+			if i+1 == len(args) {
+				return nil, nil, errors.New("--config requires a path")
+			}
+			path = args[i+1]
+			i++
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+	c, err := config.Load(path)
+	return c, positional, err
+}
 func initCmd(args []string) error {
 	f := flag.NewFlagSet("init", flag.ContinueOnError)
 	id := f.String("agent-id", "", "canonical agent ID")
@@ -190,7 +207,7 @@ func workers(ctx context.Context, c *config.Config, pc *peer.Client, dw *hermes.
 	}
 }
 func operatorCmd(cmd string, args []string) error {
-	c, e := configFlag(cmd, args)
+	c, positional, e := operatorConfig(args)
 	if e != nil {
 		return e
 	}
@@ -209,29 +226,29 @@ func operatorCmd(cmd string, args []string) error {
 		}
 		return e
 	case "backup":
-		if len(args) < 1 {
+		if len(positional) < 1 {
 			return errors.New("backup requires path before --config")
 		}
-		return s.Backup(ctx, args[0])
+		return s.Backup(ctx, positional[0])
 	case "rebuild-projections":
 		return s.RebuildProjections(ctx, store.BackupName(c.DBPath()))
 	case "inbox":
 		v, e := s.Messages(ctx, "", false, 100)
 		return printJSON(v, e)
 	case "thread":
-		if len(args) < 1 {
+		if len(positional) < 1 {
 			return errors.New("thread requires ID")
 		}
-		v, e := s.Messages(ctx, args[0], false, 100)
+		v, e := s.Messages(ctx, positional[0], false, 100)
 		return printJSON(v, e)
 	case "tasks":
 		v, e := s.ListTasks(ctx, "", "", 100)
 		return printJSON(v, e)
 	case "task":
-		if len(args) < 1 {
+		if len(positional) < 1 {
 			return errors.New("task requires ID")
 		}
-		v, e := s.GetTask(ctx, args[0])
+		v, e := s.GetTask(ctx, positional[0])
 		return printJSON(v, e)
 	case "sync":
 		for _, p := range c.Peers {
@@ -242,11 +259,11 @@ func operatorCmd(cmd string, args []string) error {
 		fmt.Println("ok")
 		return nil
 	case "ping":
-		if len(args) < 1 {
+		if len(positional) < 1 {
 			return errors.New("ping requires peer ID")
 		}
 		for _, p := range c.Peers {
-			if p.ID == args[0] {
+			if p.ID == positional[0] {
 				st, lat, e := pc.Ping(ctx, p.URL, p.Token)
 				if e == nil {
 					fmt.Printf("latency_ms=%d\n", lat.Milliseconds())

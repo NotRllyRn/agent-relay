@@ -1,0 +1,21 @@
+[Unit]
+Description=Agent Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-relay
+Group=agent-relay
+EnvironmentFile=/etc/agent-relay/relay.env
+ExecStart=/usr/local/bin/relay serve --config /etc/agent-relay/config.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agent-relay
+
+[Install]
+WantedBy=multi-user.target
