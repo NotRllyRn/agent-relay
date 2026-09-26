@@ -187,6 +187,26 @@ func (s *Server) sync(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	for _, event := range req.Events {
+		if event.EventType != "message.created" {
+			continue
+		}
+		seen, err := s.Store.HasEvent(r.Context(), "message.received", event.AggregateID)
+		if err != nil {
+			writeErr(w, 500, "internal_error", "database error", nil)
+			return
+		}
+		if !seen {
+			if _, err = s.Store.Append(r.Context(), "message.received", "message", event.AggregateID, event.CorrelationID, event.EventID, map[string]any{"message_id": event.AggregateID, "at": time.Now().UTC()}); err != nil {
+				writeErr(w, 500, "internal_error", "could not create receipt", nil)
+				return
+			}
+		}
+		if err = s.Store.QueueDelivery(r.Context(), event.AggregateID); err != nil {
+			writeErr(w, 500, "internal_error", "could not queue delivery", nil)
+			return
+		}
+	}
 	accepted, _, _ := s.Store.Head(r.Context(), caller)
 	self, _, _ := s.Store.Head(r.Context(), s.LocalID)
 	events, e := s.Store.EventsAfter(r.Context(), s.LocalID, req.KnownPeerSeq, s.MaxEvents)
