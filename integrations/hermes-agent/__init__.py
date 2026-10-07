@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 try:
-    from .bridge import Bridge, Ledger, LocalClient
+    from .bridge import Bridge, LocalClient
 except ImportError:  # Supports file-based plugin loaders as well as packages.
     import importlib.util
     import sys
@@ -12,14 +12,14 @@ except ImportError:  # Supports file-based plugin loaders as well as packages.
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    Bridge, Ledger, LocalClient = module.Bridge, module.Ledger, module.LocalClient
+    Bridge, LocalClient = module.Bridge, module.LocalClient
 
 
 def register(ctx):
-    from hermes_constants import get_hermes_home
+
     owner = os.environ.get('AGENT_RELAY_AGENT_ID', '')
     if not owner:
         logging.getLogger(__name__).warning('AGENT_RELAY_AGENT_ID unset: relay route binding fails closed')
-    bridge = Bridge(LocalClient(), owner, Ledger(get_hermes_home() / 'state' / 'agent-relay-admissions.db'))
+    bridge = Bridge(LocalClient(), owner)
     ctx.register_hook('transform_tool_result', bridge.transform_tool_result)
     ctx.register_hook('gateway_ready', bridge.gateway_ready)

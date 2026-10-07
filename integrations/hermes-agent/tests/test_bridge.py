@@ -15,7 +15,7 @@ from gateway.config import Platform
 from gateway.session import SessionSource, SessionEntry
 from gateway.session_context import set_session_vars, clear_session_vars
 from gateway.wake import WakeNotAccepted
-from bridge import Bridge, Ledger, parse_result
+from bridge import Bridge, parse_result
 
 class Client:
     def __init__(self): self.calls = []; self.callbacks = []
@@ -34,7 +34,7 @@ class Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.client = Client()
-        self.bridge = Bridge(self.client, 'local', Ledger(Path(self.tmp.name) / 'ledger.db'))
+        self.bridge = Bridge(self.client, 'local')
         self.source = SessionSource(platform=Platform.TELEGRAM, chat_id='42', thread_id='7', profile='default')
         now = datetime.now()
         self.entry = SessionEntry('agent:main:telegram:42:7', 'sid', now, now, origin=self.source)
@@ -43,6 +43,8 @@ class Tests(unittest.TestCase):
         self.gateway = SimpleNamespace(adapters={Platform.TELEGRAM: self.adapter}, session_store=self.store)
         self.receipts = {}
         async def admit(callback_id, event):
+            if not self.adapter.supports_async_delivery:
+                raise ValueError('push adapter unavailable')
             if callback_id not in self.receipts:
                 await self.adapter.handle_message(event)
                 if not event._gateway_accepted:
@@ -53,6 +55,7 @@ class Tests(unittest.TestCase):
         self.bridge.gateway = self.gateway
         self.bridge.store = self.store
         self.route = dict(thread_id='thr', task_id='', owner_agent_id='local', platform='telegram', chat_id='42', platform_thread_id='7', hermes_session_id='sid', hermes_session_key=self.entry.session_key, profile_name='default', reply_policy='normal')
+        self.route['transport_profile'] = 'default'
         self.callback = dict(callback_id='cb', route=self.route, events=[dict(event_id='evt', event_type='message.created', payload={'body_markdown':'reply'})], attempts=0)
     def tearDown(self):
         clear_session_vars([])
@@ -74,6 +77,19 @@ class Tests(unittest.TestCase):
         self.assertTrue(decoded['agent_relay_return_route']['bound'])
         self.assertNotIn('chat_id', decoded['agent_relay_return_route'])
         self.assertNotIn('hermes_session_id', decoded['agent_relay_return_route'])
+    def test_secondary_runtime_and_receiving_bot_preserve_origin(self):
+        self.source.profile = 'research'
+        self.entry.transport_profile = 'maya'
+        self.entry.session_key = 'agent:research:telegram:42:7'
+        self.route.update(profile_name='research', hermes_session_key=self.entry.session_key, transport_profile='maya')
+        asyncio.run(self.bridge.deliver(self.callback))
+        self.assertEqual(self.adapter.events[0].source.profile, 'research')
+        self.assertEqual(self.adapter.events[0].metadata['gateway_session_key'], self.entry.session_key)
+    def test_receiving_bot_changed_before_first_reply_rejected(self):
+        self.entry.transport_profile = 'other'
+        with self.assertRaises(ValueError):
+            asyncio.run(self.bridge.deliver(self.callback))
+        self.assertFalse(self.adapter.events)
     def test_mcp_content_and_structured_result(self):
         self.assertEqual(parse_result({'content':[{'type':'text','text':'{"thread_id":"thr"}'}]}), {'thread_id':'thr'})
         self.assertEqual(parse_result({'structuredContent':{'thread_id':'thr'}}), {'thread_id':'thr'})
@@ -109,7 +125,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(event.metadata['gateway_session_key'], self.entry.session_key)
         self.assertEqual(event.source, self.source)
         # Simulate process restart with the same durable ledger.
-        other = Bridge(self.client, 'local', Ledger(Path(self.tmp.name) / 'ledger.db'))
+        other = Bridge(self.client, 'local')
         other.gateway, other.store = self.gateway, self.store
         asyncio.run(other.deliver(self.callback))
         self.assertEqual(len(self.adapter.events), 1)
@@ -138,10 +154,6 @@ class Tests(unittest.TestCase):
         self.adapter.accept = True
         asyncio.run(self.bridge.deliver(self.callback))
         self.assertEqual(len(self.adapter.events), 2)
-    def test_old_fence_does_not_block_durable_gateway_admission(self):
-        self.bridge.ledger.reserve('cb', self.route)
-        asyncio.run(self.bridge.deliver(self.callback))
-        self.assertEqual(len(self.adapter.events), 1)
 
     def test_queued_receipt_is_not_completion(self):
         self.receipts['agent-relay:cb'] = {'callback_id':'agent-relay:cb', 'status':'queued'}
@@ -169,6 +181,19 @@ class Tests(unittest.TestCase):
         with patch.object(registry, 'dispatch', return_value=rendered), patch('hermes_cli.lifecycle.has_hook', side_effect=lambda name: name == 'post_tool_call'), patch('hermes_cli.lifecycle.invoke_hook', side_effect=dispatch_hook):
             out = model_tools.handle_function_call('mcp__agent_relay__relay_send_message', {'recipient':'peer'}, session_id='sid', tool_call_id='tc', skip_pre_tool_call_hook=True, skip_tool_execution_middleware=True)
         self.assertEqual(out, rendered)
+        self.assertEqual(self.client.calls[0][2], self.route)
+    def test_actual_dispatch_returns_binding_receipt(self):
+        import model_tools
+        from tools.registry import registry
+        from unittest.mock import patch
+        set_session_vars(platform='telegram', chat_id='42', thread_id='7', session_key=self.entry.session_key, session_id='sid', profile='default')
+        rendered = json.dumps({'result':json.dumps({'thread_id':'thr', 'message_id':'msg'})})
+        def dispatch_hook(name, **kw):
+            return [self.bridge.transform_tool_result(**kw)]
+        with patch.object(registry, 'dispatch', return_value=rendered), patch('hermes_cli.lifecycle.has_hook', side_effect=lambda name: name == 'transform_tool_result'), patch('hermes_cli.lifecycle.invoke_hook', side_effect=dispatch_hook):
+            out = model_tools.handle_function_call('mcp__agent_relay__relay_send_message', {'recipient':'peer'}, session_id='sid', tool_call_id='tc', skip_pre_tool_call_hook=True, skip_tool_execution_middleware=True)
+        self.assertEqual(parse_result(out), {'thread_id':'thr', 'message_id':'msg'})
+        self.assertTrue(json.loads(out)['agent_relay_return_route']['bound'])
         self.assertEqual(self.client.calls[0][2], self.route)
     def test_local_http_fixed_loopback_and_token(self):
         import io

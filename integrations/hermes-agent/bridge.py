@@ -9,10 +9,7 @@ import contextvars
 import json
 import logging
 import os
-import sqlite3
 import threading
-from contextlib import closing
-from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, HTTPRedirectHandler, ProxyHandler, build_opener
 
@@ -70,44 +67,9 @@ class LocalClient:
             return json.loads(data) if data else None
 
 
-class Ledger:
-    """Admission fence, NOT proof of model completion.
-
-    Reserve is durable before admission. A crash in that gap is ambiguous and
-    deliberately requires operator reconciliation rather than double injection.
-    Hermes' async-delegation ledger is delegation-specific, not a public generic
-    callback admission/completion transaction.
-    """
-    def __init__(self, path):
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._db()) as db, db:
-            db.execute('CREATE TABLE IF NOT EXISTS admissions (id TEXT PRIMARY KEY, route TEXT NOT NULL, state TEXT NOT NULL)')
-        self.path.chmod(0o600)
-    def _db(self):
-        return sqlite3.connect(self.path, timeout=5)
-    def reserve(self, callback_id, route):
-        identity = json.dumps(route, sort_keys=True, separators=(',', ':'))
-        with closing(self._db()) as db, db:
-            db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT route,state FROM admissions WHERE id=?', (callback_id,)).fetchone()
-            if row:
-                if row[0] != identity:
-                    raise ValueError('callback identity changed')
-                return row[1]
-            db.execute('INSERT INTO admissions VALUES (?,?,?)', (callback_id, identity, 'reserved'))
-            return 'new'
-    def accepted(self, callback_id):
-        with closing(self._db()) as db, db:
-            db.execute("UPDATE admissions SET state='accepted' WHERE id=?", (callback_id,))
-    def release(self, callback_id):
-        with closing(self._db()) as db, db:
-            db.execute("DELETE FROM admissions WHERE id=? AND state='reserved'", (callback_id,))
-
-
 class Bridge:
-    def __init__(self, client, owner_agent_id, ledger):
-        self.client, self.owner, self.ledger = client, owner_agent_id, ledger
+    def __init__(self, client, owner_agent_id):
+        self.client, self.owner = client, owner_agent_id
         self.gateway = self.store = self.task = None
         self.lock = threading.Lock()
 
@@ -123,9 +85,11 @@ class Bridge:
         if not source or entry.session_id != route.get('hermes_session_id') or entry.suspended:
             raise ValueError('original session reset, suspended or absent')
         profile = source.profile or 'default'
-        if (profile != route.get('profile_name') or profile != 'default'
-                or entry.transport_profile not in (None, 'default')):
-            raise ValueError('profile mismatch or unsupported multiplexed destination')
+        if profile != route.get('profile_name'):
+            raise ValueError('profile mismatch')
+        transport = entry.transport_profile or 'default'
+        if 'transport_profile' in route and transport != route['transport_profile']:
+            raise ValueError('original receiving bot changed')
         if (source.platform.value != route.get('platform') or source.chat_id != route.get('chat_id')
                 or (source.thread_id or '') != route.get('platform_thread_id', '')):
             raise ValueError('destination mismatch')
@@ -161,7 +125,8 @@ class Bridge:
                      hermes_session_id=session_id, hermes_session_key=get('KEY'),
                      profile_name=get('PROFILE') or 'default', reply_policy='normal')
         try:
-            self._entry(route)
+            entry = self._entry(route)
+            route['transport_profile'] = entry.transport_profile or 'default'
             # Synchronous observer: route persists before tool result returns to context.
             self.client.request('POST', '/v1/local/routes', route)
         except Exception:
@@ -187,8 +152,10 @@ class Bridge:
 
     async def deliver(self, callback):
         from gateway.platforms.event import MessageEvent, MessageType
-        from gateway.wake import admit_internal_event, adapter_supports_push, WakeNotAccepted
+
         route = callback['route']
+        if not route.get('transport_profile'):
+            raise ValueError('route lacks original receiving bot')
         entry = self._entry(route)
         if route.get('reply_policy') not in {'normal', 'all', 'terminal_only'}:
             raise ValueError('silent or invalid route must not be admitted')
@@ -200,15 +167,14 @@ class Bridge:
         callback_id = callback['callback_id']
         if not isinstance(callback_id, str) or not callback_id:
             raise ValueError('missing callback identity')
-        adapter = self.gateway.adapters.get(entry.origin.platform)
-        if adapter is None or not adapter_supports_push(adapter):
-            raise ValueError('push adapter unavailable; stateless self-post forbidden')
+
         path = '/v1/local/callbacks/' + quote(callback_id, safe='')
         event = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=entry.origin,
             internal=True, allow_gateway_control=False,
             metadata={'gateway_session_key': entry.session_key,
                       'gateway_session_id': entry.session_id,
+                      'gateway_transport_profile': route['transport_profile'],
                       'gateway_session_strict': True, 'notification_category': 'result'})
         receipt = await self.gateway.admit_callback('agent-relay:' + callback_id, event)
         state = receipt.get('status')

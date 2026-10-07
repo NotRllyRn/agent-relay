@@ -1,75 +1,20 @@
-# Conversation return routing: partial implementation
+# Conversation return routing release checkpoint
 
-Task: `t_621d5ab4`. This is not deployed and does not satisfy live acceptance.
+Task: `t_621d5ab4`. Live acceptance is not yet verified.
 
-## Implemented locally
+## Implemented
 
-- Local-only immutable destination bindings with local thread/task ownership checks.
-- Durable remote-event callbacks, transactional ingestion/backfill, event dedupe,
-  stable batch IDs, policy selection, five-second coalescing and progress throttling.
-- Loopback-only `/v1/local/routes` and callback next/complete/retry controls on the
-  existing MCP listener. Optional `AGENT_RELAY_LOCAL_TOKEN` bearer authentication.
-- Task updates include an explicit meaningful-progress flag.
-- Hook-only Hermes bridge captures actual MCP creation results and scoped context;
-  pins internal events to exact existing session IDs/keys without transcript edits.
-- Admission fence dedupes accepted callbacks across acknowledgement retries.
+- Immutable local-only return routes pin original platform/chat/thread, Hermes session ID/key, runtime profile and receiving-bot profile. No routing identifiers are synchronized to peers.
+- Durable remote-event callbacks include deduplication, stable batches, five-second coalescing, progress throttling and suppression of weaker updates after terminal outcomes.
+- Loopback local route/callback API; optional bearer authentication.
+- Hermes plugin binds actual MCP creation results before returning a model-visible binding receipt. It uses gateway-ready startup and durable admission APIs, not transcript mutation or private runner discovery.
+- Narrow Hermes fork extension persists queued callbacks, restores receiving transport under multiplexing, rejects stale/reset routes, waits for idle turn boundaries without blocking unrelated lanes, and records adapter outcome.
+- Queued callbacks recover after restart. Running callbacks interrupted by crashes are explicitly uncertain and are not silently replayed; exactly-once model execution or transport delivery is not claimed.
 
-## Verified commands
+## Release verification
 
-- `go test ./...` passed.
-- `go test -race ./...` passed.
-- `go vet ./...` passed.
-- Linux amd64 and Darwin arm64 `go build ./cmd/relay` passed.
-- Installed Hermes Python: `python -m unittest discover -s integrations/hermes-agent/tests -v` passed (18 tests).
-- `git diff --check` passed.
+Continuation verified 22 bridge unittest tests and 47 gateway callback, transport, delivery, shutdown and streaming regression tests through the official isolated test runner. Go unit tests and vet pass; previous run verified race tests and Linux amd64 / Darwin arm64 builds. Fresh independent release review found no blocking defects in the corrections (delivery boundary, idle-lane fairness, receiving-bot pinning). Deployment and exact-head remote CI must be recorded separately after readback.
 
-`pytest` is not installed in the Hermes venv; unittest is the actual test framework.
-Independent third-agent review could not run: this one-shot runtime enforces a
-maximum of two delegated children, already used for the store and bridge slices.
+## Outstanding acceptance
 
-## Supported Hermes integration gap
-
-Official plugin documentation describes `ctx.inject_message(content, role,
-session_key=...)`; installed `hermes_cli/plugins.py:603` implements it. It is not
-absent. However, its boolean receipt means scheduling, not concrete adapter
-admission; it accepts only a session key, not the original session ID or callback
-identity. `gateway/run_inbound.py:1861` resolves the current session for that key.
-Consequently a stale callback after `/new` cannot safely use it as-is.
-
-Installed `gateway/wake.py:79` does expose `admit_internal_event`, with a real
-adapter-admission receipt. The bridge uses this after `pre_gateway_dispatch`
-provides the gateway/store handles. Installed lifecycle startup dispatch
-(`gateway/run_startup.py:1430`) exposes platform names, not those handles, so this
-bridge cannot resume pending callbacks unattended after a cold restart until
-another external inbound event supplies the handles.
-
-The SQLite admission fence also has an unavoidable ambiguous window between its
-reservation and gateway acceptance. It fails closed instead of duplicating a
-turn, requiring reconciliation. A scheduled/accepted event is not durable model
-completion or outbound Discord delivery; claiming exactly-once terminal delivery
-would be false.
-
-A supported Hermes-side lifecycle/admission integration must expose gateway-ready
-handles and original-session/callback identity with durable admission/recovery.
-Request explicit scope approval before modifying the separate Hermes source tree
-or deploying an incomplete integration. Do not work around this by mutating
-transcripts, forging Tim messages, discovering runners via private globals, or
-marking scheduling as successful callback admission.
-
-## Still required
-
-- Resolve cold-start and ambiguous-admission integration.
-- Model-visible immediate creation receipt / binding failure warning.
-- Suppress obsolete weaker updates after stronger task outcomes; configurable
-  callback status/policy visibility remains unfinished.
-- Independent review and final secret scan; push and exact-head CI readback.
-- Backup-first symmetric deployment and binary/process/readiness verification.
-- Real original-context Discord test in thread `1553488764075122738`: distinct
-  post-turn gateway execution and outbound Wilbur message without human prompting.
-
-No live test was triggered; no Discord receipt exists. Existing services were not
-restarted, no binary/config/plugin was installed, and nothing was pushed.
-
-Deployment discovery: local systemd gateway PID 250 and relay PID 288 at inspection;
-Maya SSH reachable, Darwin arm64, relay PID 50989 at inspection. Treat these as
-historical evidence, never as current process state for rollout.
+Publish reviewed heads; verify exact remote commit and CI. Deploy backup-first on both peers and verify actual process/source/binary identities and readiness. Notify Tim through supported delivery before testing. Send delayed Maya request from a real originating gateway turn in Discord thread `1553488764075122738`, end that turn, and require a separate callback-driven gateway turn plus outbound Wilbur message without Tim prompting. Record admission, distinct turn IDs, original session ID, peer event and outbound Discord message ID. Polling or worker completion notifications are not this acceptance test.

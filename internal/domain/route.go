@@ -11,5 +11,6 @@ type ConversationRoute struct {
 	HermesSessionID  string `json:"hermes_session_id,omitempty"`
 	HermesSessionKey string `json:"hermes_session_key,omitempty"`
 	ProfileName      string `json:"profile_name,omitempty"`
+	TransportProfile string `json:"transport_profile,omitempty"`
 	ReplyPolicy      string `json:"reply_policy"`
 }
