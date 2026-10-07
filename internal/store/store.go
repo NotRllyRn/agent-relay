@@ -44,7 +44,7 @@ func Open(ctx context.Context, path, localID string, maxPayload int) (*Store, er
 			return nil, err
 		}
 	}
-	if _, err = db.ExecContext(ctx, schema); err != nil {
+	if _, err = db.ExecContext(ctx, schema+conversationSchema); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -136,6 +136,9 @@ func (s *Store) Ingest(ctx context.Context, origin string, events []domain.Event
 		}
 	}
 	if err = retryPendingProjections(ctx, tx); err != nil {
+		return err
+	}
+	if err = s.backfillCallbacks(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()
