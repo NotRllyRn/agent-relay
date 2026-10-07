@@ -157,6 +157,7 @@ func (s *Store) DueCallbacks(ctx context.Context, limit int) ([]Callback, error)
 	}
 	var out []Callback
 	seen := map[string]bool{}
+	responseBytes := 2 // Array brackets; headroom below the bridge's 2 MiB cap.
 	for _, x := range seeds {
 		key := x.batch
 		if key == "" {
@@ -167,13 +168,19 @@ func (s *Store) DueCallbacks(ctx context.Context, limit int) ([]Callback, error)
 		}
 		if x.batch == "" {
 			// Freeze membership at first poll; never mutate an admitted/retrying batch.
+			if _, err = tx.ExecContext(ctx, "SAVEPOINT callback_candidate"); err != nil {
+				return nil, err
+			}
 			q := `UPDATE conversation_callback_jobs SET batch_id=? WHERE callback_id=?`
 			args := []any{key, x.id}
 			if x.kind != "terminal" {
-				q = `UPDATE conversation_callback_jobs SET batch_id=? WHERE route_thread_id=? AND kind=? AND state='pending' AND batch_id='' AND next_attempt_at<=?`
+				q = `UPDATE conversation_callback_jobs SET batch_id=? WHERE callback_id IN (SELECT callback_id FROM (SELECT callback_id,next_attempt_at, SUM(length(event_json)) OVER (ORDER BY next_attempt_at,callback_id) AS bytes FROM conversation_callback_jobs WHERE route_thread_id=? AND kind=? AND state='pending' AND batch_id='' AND next_attempt_at<=?) WHERE bytes<=524288 ORDER BY next_attempt_at,callback_id LIMIT 16)`
 				args = []any{key, x.thread, x.kind, now}
 			}
 			if _, err = tx.ExecContext(ctx, q, args...); err != nil {
+				return nil, err
+			}
+			if _, err = tx.ExecContext(ctx, `UPDATE conversation_callback_jobs SET batch_id=? WHERE callback_id=? AND batch_id=''`, key, x.id); err != nil {
 				return nil, err
 			}
 		}
@@ -203,6 +210,14 @@ func (s *Store) DueCallbacks(ctx context.Context, limit int) ([]Callback, error)
 				return nil, err
 			}
 			c.Events = append(c.Events, ev)
+			if len(ev.PayloadJSON) > 256*1024 {
+				preview := string(ev.PayloadJSON[:8192])
+				c.Events[len(c.Events)-1].PayloadJSON, err = json.Marshal(map[string]any{"callback_payload_omitted": true, "original_bytes": len(ev.PayloadJSON), "preview": preview})
+				if err != nil {
+					rr.Close()
+					return nil, err
+				}
+			}
 			if attempts > c.Attempts {
 				c.Attempts = attempts
 			}
@@ -214,6 +229,38 @@ func (s *Store) DueCallbacks(ctx context.Context, limit int) ([]Callback, error)
 		}
 		seen[key] = true
 		// Mark all seed IDs consumed so grouped seeds do not make another batch.
+		encoded, err := json.Marshal(c)
+		if err != nil {
+			return nil, err
+		}
+		// Old releases could freeze arbitrarily large batches. Keep the persisted
+		// membership/identity intact, but expose a bounded, explicit legacy summary.
+		if (len(encoded) > 768*1024 || len(c.Events) > 16) && len(c.Events) > 0 {
+			summary := domain.Event{EventType: "relay.callback_summary"}
+			summary.PayloadJSON, err = json.Marshal(map[string]any{"callback_events_omitted": true, "event_count": len(c.Events), "instruction": "Oversized frozen batch: full events remain in the local Relay store; operator inspection is required. Do not claim a final outcome from this summary."})
+			if err != nil {
+				return nil, err
+			}
+			c.Events = []domain.Event{summary}
+			encoded, err = json.Marshal(c)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if responseBytes+len(encoded)+1 > 1024*1024 {
+			if x.batch == "" {
+				if _, err = tx.ExecContext(ctx, "ROLLBACK TO callback_candidate"); err != nil {
+					return nil, err
+				}
+			}
+			if len(encoded)+3 > 1024*1024 {
+				if _, err = tx.ExecContext(ctx, `UPDATE conversation_callback_jobs SET last_error='callback routing envelope exceeds response limit; operator reconciliation required' WHERE batch_id=? OR callback_id=?`, key, x.id); err != nil {
+					return nil, err
+				}
+			}
+			continue
+		}
+		responseBytes += len(encoded) + 1
 		for _, ev := range c.Events {
 			seen["cb_"+ev.EventID] = true
 		}
