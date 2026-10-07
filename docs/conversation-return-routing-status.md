@@ -14,6 +14,12 @@ Task: `t_621d5ab4`. Live acceptance is not yet verified.
 
 ## Release verification
 
+Review corrections bound new frozen batches to 16 events and 512 KiB of stored event JSON (a single larger seed is represented by an explicit bounded payload preview). The aggregate callback response is capped at 1 MiB, below the bridge's unchanged 2 MiB safety limit. Remaining events stay pending; candidates which do not fit are not frozen. Previously frozen oversized batches retain their database membership and callback identity and return an explicit operator-inspection summary rather than silently discarding source data. Full payloads remain in the local store; previews/summaries must not be treated as verified final outcomes.
+
+Operator reconciliation: authenticated loopback GET `/v1/local/callbacks/status` reports pending event count, oldest next-attempt timestamp, and up to 100 failed logical batches with attempts, last error and next-attempt time. Rejected/uncertain gateway receipts appear there after the bridge records retry errors; they require inspection of the gateway admission ledger, not blind manual replay. This endpoint is private, not synchronized and may contain peer-derived error text. `oldest_due_unix_nano` is a due timestamp, not creation age.
+
+Scope disposition: coalescing (5 seconds), progress throttle (300 seconds), retry (30 seconds) and default normal policy remain fixed. Route policy can be changed through the local binding API. Configurable timing/default-enable settings and dedicated routes/callback CLI commands from plan task 8 are deferred, not claimed implemented. The minimal reconciliation endpoint replaces no gateway recovery mechanism.
+
 Continuation verified 22 bridge unittest tests and 47 gateway callback, transport, delivery, shutdown and streaming regression tests through the official isolated test runner. Go unit tests and vet pass; previous run verified race tests and Linux amd64 / Darwin arm64 builds. Fresh independent release review found no blocking defects in the corrections (delivery boundary, idle-lane fairness, receiving-bot pinning). Deployment and exact-head remote CI must be recorded separately after readback.
 
 ## Outstanding acceptance

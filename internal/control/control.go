@@ -55,6 +55,10 @@ func Handler(s *store.Store, token string) http.Handler {
 		}
 		respond(w, jobs, err)
 	})
+	mux.HandleFunc("GET /v1/local/callbacks/status", func(w http.ResponseWriter, r *http.Request) {
+		status, err := s.CallbackStatus(r.Context())
+		respond(w, status, err)
+	})
 	mux.HandleFunc("POST /v1/local/callbacks/{id}/complete", func(w http.ResponseWriter, r *http.Request) {
 		var body struct{}
 		if !decode(w, r, &body) {

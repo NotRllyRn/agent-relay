@@ -37,6 +37,24 @@ func TestLocalControlsRejectNonLocalAndUnauthenticated(t *testing.T) {
 			t.Fatalf("got %d want %d: %s", w.Code, tc.want, w.Body.String())
 		}
 	}
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{{"", http.StatusUnauthorized}, {"test-token", http.StatusOK}} {
+		r := httptest.NewRequest("GET", "/v1/local/callbacks/status", nil)
+		r.RemoteAddr = "127.0.0.1:42"
+		if tc.token != "" {
+			r.Header.Set("Authorization", "Bearer "+tc.token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != tc.want {
+			t.Fatalf("status got %d want %d", w.Code, tc.want)
+		}
+		if tc.want == http.StatusOK && !strings.Contains(w.Body.String(), `"pending":0`) {
+			t.Fatal("missing status", w.Body.String())
+		}
+	}
 }
 
 func TestLocalControlsRejectMalformedRoute(t *testing.T) {
