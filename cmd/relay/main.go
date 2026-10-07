@@ -3,6 +3,7 @@ package main
 import (
 	"agent-relay/internal/app"
 	"agent-relay/internal/config"
+	"agent-relay/internal/control"
 	"agent-relay/internal/hermes"
 	relaymcp "agent-relay/internal/mcp"
 	"agent-relay/internal/notify"
@@ -159,6 +160,7 @@ func serveCmd(args []string) error {
 	peerHTTP := &http.Server{Addr: c.PeerListen, Handler: ps.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	mux := http.NewServeMux()
 	mux.Handle("/mcp", relaymcp.New(svc, version))
+	mux.Handle("/v1/local/", control.Handler(s, os.Getenv("AGENT_RELAY_LOCAL_TOKEN")))
 	controlHTTP := &http.Server{Addr: c.MCPListen, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
 	errc := make(chan error, 2)
 	go func() {

@@ -202,7 +202,7 @@ func (s *Service) UpdateTask(ctx context.Context, id, status, summary, next, blo
 			return domain.Event{}, fmt.Errorf("invalid status")
 		}
 	}
-	p := map[string]any{"task_id": id, "summary": summary, "next_step": next, "blocker": blocker, "final_result": result, "artifact_refs": artifacts}
+	p := map[string]any{"task_id": id, "summary": summary, "next_step": next, "blocker": blocker, "final_result": result, "artifact_refs": artifacts, "meaningful": meaningful}
 	ev, e := s.Store.Append(ctx, eventType, "task", id, t.ThreadID, "", p)
 	if e == nil && s.NotifyTasks && (status != "" || meaningful) {
 		nid := "notif_" + ev.EventID
