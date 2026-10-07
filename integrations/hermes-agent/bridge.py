@@ -1,7 +1,6 @@
 """Private origin routing; no replacement tools, transcript writes or user impersonation.
 
-The installed Hermes has no supported startup hook exposing GatewayRunner. Polling
-can therefore start only after pre_gateway_dispatch supplies it (see README).
+Requires the supported gateway_ready hook and durable admit_callback API.
 """
 from __future__ import annotations
 
@@ -159,8 +158,7 @@ class Bridge:
             log.exception('relay origin route not bound (thread=%s)', thread_id)
         return None
 
-    async def pre_gateway_dispatch(self, event, gateway, session_store, **kwargs):
-        # Do not use the incoming event to infer origin identity; this hook is pre-auth.
+    async def gateway_ready(self, gateway, session_store, **kwargs):
         with self.lock:
             if self.gateway is not None and self.gateway is not gateway:
                 log.error('relay bridge refuses a second gateway instance')
@@ -169,7 +167,7 @@ class Bridge:
             if self.task is None or self.task.done():
                 # No context from this potentially unauthorized inbound sender in the worker.
                 self.task = asyncio.create_task(self.poll(), name='agent-relay-callbacks', context=contextvars.Context())
-                log.warning('relay callback worker started lazily; startup-only recovery is unsupported')
+                log.info('relay durable callback worker ready')
         return None
 
     async def deliver(self, callback):
@@ -190,31 +188,21 @@ class Bridge:
         adapter = self.gateway.adapters.get(entry.origin.platform)
         if adapter is None or not adapter_supports_push(adapter):
             raise ValueError('push adapter unavailable; stateless self-post forbidden')
-        state = self.ledger.reserve(callback_id, route)
         path = '/v1/local/callbacks/' + quote(callback_id, safe='')
-        if state == 'reserved':
-            raise RuntimeError('ambiguous admission after crash; operator reconciliation required')
-        if state == 'accepted':
-            await asyncio.to_thread(self.client.request, 'POST', path + '/complete', {})
-            return
         event = MessageEvent(
-            text=text,
-            message_type=MessageType.TEXT, source=entry.origin, internal=True,
-            allow_gateway_control=False,
-            message_id='agent-relay:' + callback_id,
-            metadata={'gateway_session_key': entry.session_key, 'gateway_session_id': entry.session_id,
-                      'gateway_session_strict': True,
-                      'agent_relay_callback_id': callback_id, 'notification_category': 'result'})
-        try:
-            # Recheck immediately before admission; gateway also verifies the pinned identity.
-            self._entry(route)
-            await admit_internal_event(adapter, event)
-        except (WakeNotAccepted, ValueError):
-            self.ledger.release(callback_id)
-            raise
-        # Unexpected handler failures can be post-admission: retain ambiguous fence.
-        self.ledger.accepted(callback_id)
-        await asyncio.to_thread(self.client.request, 'POST', path + '/complete', {})
+            text=text, message_type=MessageType.TEXT, source=entry.origin,
+            internal=True, allow_gateway_control=False,
+            metadata={'gateway_session_key': entry.session_key,
+                      'gateway_session_id': entry.session_id,
+                      'gateway_session_strict': True, 'notification_category': 'result'})
+        receipt = await self.gateway.admit_callback('agent-relay:' + callback_id, event)
+        state = receipt.get('status')
+        if state == 'completed':
+            await asyncio.to_thread(self.client.request, 'POST', path + '/complete', {})
+        elif state in {'uncertain', 'rejected'}:
+            raise RuntimeError('gateway callback ' + state + '; reconciliation required: ' + callback_id)
+        elif state not in {'queued', 'running'}:
+            raise RuntimeError('invalid gateway callback receipt')
 
     async def poll_once(self):
         callbacks = await asyncio.to_thread(self.client.request, 'GET', '/v1/local/callbacks/next?limit=20')

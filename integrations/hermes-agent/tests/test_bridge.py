@@ -41,6 +41,15 @@ class Tests(unittest.TestCase):
         self.adapter = Adapter()
         self.store = SimpleNamespace(list_sessions=lambda: [self.entry])
         self.gateway = SimpleNamespace(adapters={Platform.TELEGRAM: self.adapter}, session_store=self.store)
+        self.receipts = {}
+        async def admit(callback_id, event):
+            if callback_id not in self.receipts:
+                await self.adapter.handle_message(event)
+                if not event._gateway_accepted:
+                    raise WakeNotAccepted('not admitted')
+                self.receipts[callback_id] = {'callback_id':callback_id, 'status':'completed'}
+            return self.receipts[callback_id]
+        self.gateway.admit_callback = admit
         self.bridge.gateway = self.gateway
         self.bridge.store = self.store
         self.route = dict(thread_id='thr', task_id='', owner_agent_id='local', platform='telegram', chat_id='42', platform_thread_id='7', hermes_session_id='sid', hermes_session_key=self.entry.session_key, profile_name='default', reply_policy='normal')
@@ -119,10 +128,18 @@ class Tests(unittest.TestCase):
         self.adapter.accept = True
         asyncio.run(self.bridge.deliver(self.callback))
         self.assertEqual(len(self.adapter.events), 2)
-    def test_crash_ambiguous_fence_not_reinjected(self):
+    def test_old_fence_does_not_block_durable_gateway_admission(self):
         self.bridge.ledger.reserve('cb', self.route)
-        with self.assertRaises(RuntimeError): asyncio.run(self.bridge.deliver(self.callback))
-        self.assertFalse(self.adapter.events)
+        asyncio.run(self.bridge.deliver(self.callback))
+        self.assertEqual(len(self.adapter.events), 1)
+
+    def test_queued_receipt_is_not_completion(self):
+        self.receipts['agent-relay:cb'] = {'callback_id':'agent-relay:cb', 'status':'queued'}
+        asyncio.run(self.bridge.deliver(self.callback))
+        self.assertFalse(any('/complete' in path for _,path,_ in self.client.calls))
+        self.receipts['agent-relay:cb']['status'] = 'completed'
+        asyncio.run(self.bridge.deliver(self.callback))
+        self.assertTrue(any('/complete' in path for _,path,_ in self.client.calls))
     def test_stateless_and_suspended_fail_closed(self):
         self.adapter.supports_async_delivery = False
         with self.assertRaises(ValueError): asyncio.run(self.bridge.deliver(self.callback))
@@ -175,9 +192,9 @@ class Tests(unittest.TestCase):
         async def run():
             self.bridge.gateway = self.bridge.store = None
             self.bridge.poll = AsyncMock()
-            await self.bridge.pre_gateway_dispatch(object(), self.gateway, self.store)
+            await self.bridge.gateway_ready(self.gateway, self.store)
             task = self.bridge.task
-            await self.bridge.pre_gateway_dispatch(object(), self.gateway, self.store)
+            await self.bridge.gateway_ready(self.gateway, self.store)
             self.assertIs(self.bridge.task, task)
             await task
             self.bridge.poll.assert_awaited_once()
@@ -200,6 +217,6 @@ class Tests(unittest.TestCase):
         from unittest.mock import patch
         with patch('hermes_constants.get_hermes_home', return_value=Path(self.tmp.name)):
             mod.register(SimpleNamespace(register_hook=lambda name, fn: hooks.update({name:fn})))
-        self.assertEqual(set(hooks), {'post_tool_call','pre_gateway_dispatch'})
+        self.assertEqual(set(hooks), {'post_tool_call','gateway_ready'})
 
 if __name__ == '__main__': unittest.main()

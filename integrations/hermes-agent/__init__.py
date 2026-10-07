@@ -22,4 +22,4 @@ def register(ctx):
         logging.getLogger(__name__).warning('AGENT_RELAY_AGENT_ID unset: relay route binding fails closed')
     bridge = Bridge(LocalClient(), owner, Ledger(get_hermes_home() / 'state' / 'agent-relay-admissions.db'))
     ctx.register_hook('post_tool_call', bridge.post_tool_call)
-    ctx.register_hook('pre_gateway_dispatch', bridge.pre_gateway_dispatch)
+    ctx.register_hook('gateway_ready', bridge.gateway_ready)
