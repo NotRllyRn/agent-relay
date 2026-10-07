@@ -109,12 +109,37 @@ class Tests(unittest.TestCase):
             _emit_post_tool_call_hook(function_name='mcp__agent_relay__relay_send_message', function_args={'recipient':'peer'}, result=rendered, session_id='sid', status='ok')
         self.assertEqual(self.client.calls[0][2], self.route)
     def test_no_context_no_route(self):
+        out = self.bridge.transform_tool_result(tool_name='mcp__agent_relay__relay_send_message', result='{"thread_id":"thr"}', session_id='sid', status='ok')
+        assert isinstance(out, str)
+        self.assertFalse(json.loads(out)['agent_relay_return_route']['bound'])
         self.bridge.post_tool_call(tool_name='mcp__agent_relay__relay_send_message', args={}, result='{"thread_id":"thr"}', session_id='sid', status='ok')
+        self.assertFalse(self.client.calls)
+    def test_unavailable_owner_or_store_receipt(self):
+        for field, value in [('owner', ''), ('store', None)]:
+            original = getattr(self.bridge, field)
+            setattr(self.bridge, field, value)
+            out = self.bridge.transform_tool_result(tool_name='relay_send_message', result='{"thread_id":"thr"}', status='ok')
+            assert isinstance(out, str)
+            self.assertFalse(json.loads(out)['agent_relay_return_route']['bound'])
+            setattr(self.bridge, field, original)
         self.assertFalse(self.client.calls)
     def test_context_session_mismatch(self):
         set_session_vars(platform='telegram', chat_id='42', session_key=self.entry.session_key, session_id='other', profile='default')
+        out = self.bridge.transform_tool_result(tool_name='relay_send_message', result='{"thread_id":"thr"}', session_id='sid', status='ok')
+        assert isinstance(out, str)
+        self.assertFalse(json.loads(out)['agent_relay_return_route']['bound'])
         self.bridge.post_tool_call(tool_name='mcp__agent_relay__relay_send_message', args={}, result='{"thread_id":"thr"}', session_id='sid', status='ok')
         self.assertFalse(self.client.calls)
+    def test_child_and_cron_negative_receipts(self):
+        from unittest.mock import patch
+        for target in ('agent.delegation_context.is_delegated_child_context', 'gateway.session_context.get_session_env'):
+            with self.subTest(target=target), patch(target, return_value=True):
+                out = self.bridge.transform_tool_result(tool_name='relay_send_message', result='{"thread_id":"thr"}', session_id='sid', status='ok')
+                assert isinstance(out, str)
+                self.assertFalse(json.loads(out)['agent_relay_return_route']['bound'])
+        self.assertFalse(self.client.calls)
+        self.assertIsNone(self.bridge.transform_tool_result(tool_name='unrelated', result='{"thread_id":"thr"}', status='ok'))
+        self.assertIsNone(self.bridge.transform_tool_result(tool_name='relay_send_message', result='{"error":"failed"}', status='ok'))
     def test_admission_actual_event_and_durable_dedupe(self):
         asyncio.run(self.bridge.deliver(self.callback))
         event = self.adapter.events[0]

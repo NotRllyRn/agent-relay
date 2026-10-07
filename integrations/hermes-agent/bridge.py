@@ -106,20 +106,23 @@ class Bridge:
         return json.dumps(original, ensure_ascii=False)
 
     def post_tool_call(self, tool_name='', args=None, result=None, session_id='', status='', _return_receipt=False, **kwargs):
-        if tool_name not in TOOLS or status != 'ok' or not self.owner or self.store is None:
-            return None
-        from gateway.session_context import get_session_env
-        from agent.delegation_context import is_delegated_child_context
-        if is_delegated_child_context():
-            return None
-        get = lambda field: get_session_env('HERMES_SESSION_' + field, '')
-        # Require both hook identity and caller context; no most-recent-session fallback.
-        if not session_id or get('ID') != session_id or get_session_env('HERMES_CRON_SESSION', ''):
+        if tool_name not in TOOLS or status != 'ok':
             return None
         data = parse_result(result)
         thread_id = data.get('thread_id')
         if not isinstance(thread_id, str) or not thread_id:
             return None
+        unavailable = {'bound': False, 'instruction': 'Tell the user that automatic return routing was not secured; do not promise a callback.'} if _return_receipt else None
+        if not self.owner or self.store is None:
+            return unavailable
+        from gateway.session_context import get_session_env
+        from agent.delegation_context import is_delegated_child_context
+        if is_delegated_child_context():
+            return unavailable
+        get = lambda field: get_session_env('HERMES_SESSION_' + field, '')
+        # Require both hook identity and caller context; no most-recent-session fallback.
+        if not session_id or get('ID') != session_id or get_session_env('HERMES_CRON_SESSION', ''):
+            return unavailable
         route = dict(thread_id=thread_id, task_id=data.get('task_id', ''), owner_agent_id=self.owner,
                      platform=get('PLATFORM'), chat_id=get('CHAT_ID'), platform_thread_id=get('THREAD_ID'),
                      hermes_session_id=session_id, hermes_session_key=get('KEY'),
