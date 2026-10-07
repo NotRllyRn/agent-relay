@@ -1,6 +1,6 @@
 name: agent-relay-bridge
-version: 0.1.0
-description: "Privately bind relay origins and admit callback events into exact existing gateway sessions. Lazy bootstrap only; see README limitations."
+version: 0.2.0
+description: "Privately bind relay origins and durably admit callbacks into exact existing gateway sessions. Requires Hermes callback admission extension."
 provides_hooks:
-  - post_tool_call
-  - pre_gateway_dispatch
+  - transform_tool_result
+  - gateway_ready
