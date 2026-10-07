@@ -93,9 +93,86 @@ func TestCallbacksPolicyCoalesceThrottleTerminalRestart(t *testing.T) {
 	if err = a.RebuildProjections(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
+	// Expire throttling: terminal suppression, not the progress timer, must
+	// prevent the older pending progress event from resurfacing.
+	if _, err = a.db.ExecContext(ctx, "UPDATE conversation_callback_jobs SET delivered_at=? WHERE delivered_at IS NOT NULL", time.Now().Add(-10*time.Minute).UnixNano()); err != nil {
+		t.Fatal(err)
+	}
 	jobs, err = a.DueCallbacks(ctx, 10)
 	if err != nil || len(jobs) != 0 {
 		t.Fatal("rebuild renotify", jobs, err)
+	}
+}
+
+func TestTerminalSuppressionPreservesFrozenBatchesAndReplies(t *testing.T) {
+	ctx := context.Background()
+	a, b := openTest(t, "a"), openTest(t, "b")
+	task := domain.Task{TaskID: "task_x", ThreadID: "thr_x", CreatedBy: "a", AssignedTo: "b", Objective: "test", Context: json.RawMessage(`{}`), Priority: "normal", CreatedAt: time.Now()}
+	root, err := a.Append(ctx, "task.created", "task", task.TaskID, task.ThreadID, "", task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = b.Ingest(ctx, "a", []domain.Event{root}); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.BindConversationRoute(ctx, domain.ConversationRoute{ThreadID: task.ThreadID, OwnerAgentID: "a", Platform: "discord", ChatID: "chat", HermesSessionKey: "session"}); err != nil {
+		t.Fatal(err)
+	}
+	send := func(kind, aggregate, id string, payload any) {
+		t.Helper()
+		ev, err := b.Append(ctx, kind, aggregate, id, task.ThreadID, "", payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = a.Ingest(ctx, "b", []domain.Event{ev}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDue := func() {
+		t.Helper()
+		if _, err := a.db.ExecContext(ctx, "UPDATE conversation_callback_jobs SET next_attempt_at=? WHERE state='pending'", time.Now().Add(-time.Minute).UnixNano()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send("task.accepted", "task", task.TaskID, map[string]any{"task_id": task.TaskID})
+	send("task.started", "task", task.TaskID, map[string]any{"task_id": task.TaskID})
+	makeDue()
+	jobs, err := a.DueCallbacks(ctx, 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatal(jobs, err)
+	}
+	frozen := jobs[0].CallbackID
+	send("task.progress", "task", task.TaskID, map[string]any{"task_id": task.TaskID, "meaningful": true})
+	send("task.completed", "task", task.TaskID, map[string]any{"task_id": task.TaskID, "final_result": "done"})
+	reply := msg("reply")
+	messageRoot, err := a.Append(ctx, "message.created", "message", "root", task.ThreadID, "", msg("root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = b.Ingest(ctx, "a", []domain.Event{messageRoot}); err != nil {
+		t.Fatal(err)
+	}
+	reply.SenderID, reply.RecipientID, reply.ReplyToMessageID = "b", "a", "root"
+	send("message.created", "message", reply.MessageID, reply)
+	makeDue()
+	jobs, err = a.DueCallbacks(ctx, 10)
+	if err != nil || len(jobs) != 3 || jobs[0].Events[0].EventType != "task.completed" {
+		t.Fatal("terminal, frozen update and reply expected", jobs, err)
+	}
+	for _, job := range jobs {
+		if job.CallbackID == frozen && len(job.Events) != 2 {
+			t.Fatal("frozen batch changed", job)
+		}
+		if err = a.CompleteCallback(ctx, job.CallbackID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A late lower-rank update must also remain suppressed after completion.
+	send("task.progress", "task", task.TaskID, map[string]any{"task_id": task.TaskID, "meaningful": true, "summary": "late"})
+	makeDue()
+	jobs, err = a.DueCallbacks(ctx, 10)
+	if err != nil || len(jobs) != 0 {
+		t.Fatal("late update resurfaced", jobs, err)
 	}
 }
 

@@ -129,6 +129,12 @@ func (s *Store) DueCallbacks(ctx context.Context, limit int) ([]Callback, error)
 	if err = s.backfillCallbacks(ctx, tx); err != nil {
 		return nil, err
 	}
+	// Keep tombstones so backfill cannot resurrect superseded task updates.
+	// Frozen batches may already be admitted: never alter their membership.
+	// Message replies and other tasks on the same thread remain independent.
+	if _, err = tx.ExecContext(ctx, `UPDATE conversation_callback_jobs AS j SET state='suppressed' WHERE j.state='pending' AND j.batch_id='' AND j.kind<>'terminal' AND json_extract(j.event_json,'$.aggregate_type')='task' AND EXISTS(SELECT 1 FROM conversation_callback_jobs t WHERE t.route_thread_id=j.route_thread_id AND t.kind='terminal' AND json_extract(t.event_json,'$.aggregate_id')=json_extract(j.event_json,'$.aggregate_id'))`); err != nil {
+		return nil, err
+	}
 	now := time.Now().UnixNano()
 	rows, err := tx.QueryContext(ctx, `SELECT j.callback_id,j.route_thread_id,j.kind,j.batch_id FROM conversation_callback_jobs j JOIN conversation_routes r ON r.thread_id=j.route_thread_id WHERE j.state='pending' AND j.next_attempt_at<=? AND json_extract(r.route_json,'$.reply_policy')<>'silent' AND (json_extract(r.route_json,'$.reply_policy')<>'terminal_only' OR j.kind='terminal') AND (j.kind<>'progress' OR NOT EXISTS(SELECT 1 FROM conversation_callback_jobs p WHERE p.route_thread_id=j.route_thread_id AND p.kind='progress' AND p.delivered_at>?)) ORDER BY CASE WHEN j.kind='terminal' THEN 0 ELSE 1 END,j.next_attempt_at,j.callback_id`, now, now-int64(300*time.Second))
 	if err != nil {
