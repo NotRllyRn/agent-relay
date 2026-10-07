@@ -64,6 +64,16 @@ class Tests(unittest.TestCase):
         result = json.dumps({'thread_id':'thr','message_id':'msg'})
         self.assertIsNone(self.bind(result))
         self.assertEqual(self.client.calls[0], ('POST', '/v1/local/routes', self.route))
+
+    def test_model_receives_binding_receipt_without_private_destination(self):
+        set_session_vars(platform='telegram', chat_id='42', thread_id='7', session_key=self.entry.session_key, session_id='sid', profile='default')
+        result = json.dumps({'thread_id':'thr', 'message_id':'msg'})
+        out = self.bridge.transform_tool_result(tool_name='mcp__agent_relay__relay_send_message', result=result, session_id='sid', status='ok')
+        decoded = json.loads(out)
+        self.assertEqual(decoded['message_id'], 'msg')
+        self.assertTrue(decoded['agent_relay_return_route']['bound'])
+        self.assertNotIn('chat_id', decoded['agent_relay_return_route'])
+        self.assertNotIn('hermes_session_id', decoded['agent_relay_return_route'])
     def test_mcp_content_and_structured_result(self):
         self.assertEqual(parse_result({'content':[{'type':'text','text':'{"thread_id":"thr"}'}]}), {'thread_id':'thr'})
         self.assertEqual(parse_result({'structuredContent':{'thread_id':'thr'}}), {'thread_id':'thr'})
@@ -217,6 +227,6 @@ class Tests(unittest.TestCase):
         from unittest.mock import patch
         with patch('hermes_constants.get_hermes_home', return_value=Path(self.tmp.name)):
             mod.register(SimpleNamespace(register_hook=lambda name, fn: hooks.update({name:fn})))
-        self.assertEqual(set(hooks), {'post_tool_call','gateway_ready'})
+        self.assertEqual(set(hooks), {'transform_tool_result','gateway_ready'})
 
 if __name__ == '__main__': unittest.main()

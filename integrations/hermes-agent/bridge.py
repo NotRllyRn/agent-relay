@@ -131,7 +131,17 @@ class Bridge:
             raise ValueError('destination mismatch')
         return entry
 
-    def post_tool_call(self, tool_name='', args=None, result=None, session_id='', status='', **kwargs):
+    def transform_tool_result(self, result=None, **kwargs):
+        receipt = self.post_tool_call(result=result, _return_receipt=True, **kwargs)
+        if receipt is None:
+            return None
+        original = json.loads(result) if isinstance(result, str) else dict(result)
+        if not isinstance(original, dict):
+            original = {'result': original}
+        original['agent_relay_return_route'] = receipt
+        return json.dumps(original, ensure_ascii=False)
+
+    def post_tool_call(self, tool_name='', args=None, result=None, session_id='', status='', _return_receipt=False, **kwargs):
         if tool_name not in TOOLS or status != 'ok' or not self.owner or self.store is None:
             return None
         from gateway.session_context import get_session_env
@@ -156,6 +166,11 @@ class Bridge:
             self.client.request('POST', '/v1/local/routes', route)
         except Exception:
             log.exception('relay origin route not bound (thread=%s)', thread_id)
+            if _return_receipt:
+                return {'bound': False, 'instruction': 'Tell the user that automatic return routing was not secured; do not promise a callback.'}
+        else:
+            if _return_receipt:
+                return {'bound': True, 'reply_policy': 'normal', 'instruction': 'Report the peer result to the user in this originating conversation. A binding receipt is not peer completion.'}
         return None
 
     async def gateway_ready(self, gateway, session_store, **kwargs):
