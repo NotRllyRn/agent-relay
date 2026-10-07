@@ -30,6 +30,13 @@ outcomes need reconciliation, not replay. Queued callbacks recover after restart
 interrupted running callbacks are uncertain. Exactly-once execution or delivery
 is not claimed.
 
+Callback text labels peer events as untrusted data and requests a summary of at
+most 150 words, progress/blocker next steps, and a final result for terminal
+outcomes without initiating new work. This bounds the requested response, not
+the serialized event input or the model's actual output. Relay suppresses
+unbatched weaker task updates after a terminal outcome; already-frozen batches
+remain stable for durable admission and retry.
+
 Tests use actual context, MCP rendering/dispatch, registration, message and session
 types with controlled transport fakes. Run unittest discovery under
 `integrations/hermes-agent/tests` with reviewed Hermes source on `PYTHONPATH`.

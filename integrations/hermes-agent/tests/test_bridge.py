@@ -124,6 +124,9 @@ class Tests(unittest.TestCase):
         self.assertEqual(event.metadata['gateway_session_id'], 'sid')
         self.assertEqual(event.metadata['gateway_session_key'], self.entry.session_key)
         self.assertEqual(event.source, self.source)
+        self.assertIn('at most 150 words', event.text)
+        self.assertIn('terminal', event.text)
+        self.assertIn('Do not start new work', event.text)
         # Simulate process restart with the same durable ledger.
         other = Bridge(self.client, 'local')
         other.gateway, other.store = self.gateway, self.store

@@ -5,11 +5,12 @@ Task: `t_621d5ab4`. Live acceptance is not yet verified.
 ## Implemented
 
 - Immutable local-only return routes pin original platform/chat/thread, Hermes session ID/key, runtime profile and receiving-bot profile. No routing identifiers are synchronized to peers.
-- Durable remote-event callbacks include deduplication, stable batches, five-second coalescing, progress throttling and suppression of weaker updates after terminal outcomes.
+- Durable remote-event callbacks include deduplication, stable batches, five-second coalescing and progress throttling. Terminal outcomes suppress unbatched weaker updates for the same task, including late progress; frozen batches are preserved because admission may already have occurred. Message replies and other tasks remain independent.
 - Loopback local route/callback API; optional bearer authentication.
 - Hermes plugin binds actual MCP creation results before returning a model-visible binding receipt. It uses gateway-ready startup and durable admission APIs, not transcript mutation or private runner discovery.
 - Narrow Hermes fork extension persists queued callbacks, restores receiving transport under multiplexing, rejects stale/reset routes, waits for idle turn boundaries without blocking unrelated lanes, and records adapter outcome.
 - Queued callbacks recover after restart. Running callbacks interrupted by crashes are explicitly uncertain and are not silently replayed; exactly-once model execution or transport delivery is not claimed.
+- Callback prompts request a user-facing summary of at most 150 words, distinguish peer claims from verified results, and report terminal outcomes without starting new work. This is a model instruction, not an enforced output-length limit.
 
 ## Release verification
 
